@@ -1,0 +1,57 @@
+{
+	"name": "fortunememory",
+	"version": "1.0.0",
+	"license": "MIT",
+	"description": "Mémoire durable locale pour agents : search hybride (lexical + vectoriel RRF), conflits, contextes attribués. Zéro réseau par défaut, provider sqlite natif.",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/itsrealfortune/chlone"
+	},
+	"homepage": "https://github.com/itsrealfortune/chlone#readme",
+	"keywords": ["memory", "agent", "sqlite", "vector-search", "opencode"],
+	"main": "./dist/index.js",
+	"module": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"default": "./dist/index.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"files": [
+		"dist",
+		"README.md",
+		"LICENSE"
+	],
+	"type": "module",
+	"engines": {
+		"node": ">=22.5"
+	},
+	"bin": {
+		"fortune-migrate": "./dist/migrate.js"
+	},
+	"scripts": {
+		"prepack": "npm run build",
+		"build": "tsc --project tsconfig.json",
+		"typecheck": "tsc --noEmit --project tsconfig.json",
+		"test": "npm run build && node ./dist/test.js",
+		"check": "bunx --bun @biomejs/biome check ./src",
+		"lint": "bunx --bun @biomejs/biome lint ./src",
+		"lint:write": "bunx --bun @biomejs/biome lint --write ./src",
+		"format": "bunx --bun @biomejs/biome format --write ./src",
+		"deploy:npm": "npm publish --access public",
+		"publish-package": "bash ./scripts/publish-package.sh"
+	},
+	"optionalDependencies": {
+		"@electric-sql/pglite": "^0.5.8",
+		"mysql2": "^3.24.4",
+		"roxify": "^1.16.17"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.12",
+		"@types/node": "^22.18.0",
+		"typescript": "^5.8.0"
+	}
+}
