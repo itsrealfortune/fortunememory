@@ -50,8 +50,8 @@
 		"roxify": "^1.16.17"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "^2.4.12",
-		"@types/node": "^22.18.0",
-		"typescript": "^5.8.0"
+		"@biomejs/biome": "^2.5.14",
+		"@types/node": "^26.6.2",
+		"typescript": "^7.0.2"
 	}
 }
