@@ -1,18 +1,48 @@
 # fortunememory
 
-Mémoire durable locale pour agents : search hybride (lexical + vectoriel, fusion RRF), détection de conflits, contextes compacts attribués aux sources. Zéro réseau par défaut, provider `sqlite` natif (`node:sqlite`, sans dépendance).
+Durable local memory for agents: hybrid search (lexical + vector, RRF fusion), conflict detection, compact source-attributed contexts. Zero network by default, native `sqlite` provider (`node:sqlite`, no dependency).
 
-Extraite du plugin opencode Fortune (`fortunememory.ts` importe cette lib).
+Ships with an OpenCode plugin (`opencode-plugin.ts`) that exposes the library as 7 native tools.
 
 ## Installation
 
-```
+```bash
 npm install fortunememory
 ```
 
-Node `>=22.5` requis (utilise `node:sqlite`, expérimental sur la 22, stable ensuite).
+Node `>=22.5` required (uses `node:sqlite`, experimental on 22, stable after).
 
-## Usage rapide
+## OpenCode plugin
+
+`opencode-plugin.ts` is a thin wrapper around this library: all business logic (manager, providers, vectors, schema) lives here. It declares 7 native tools:
+
+- `fortune_search_memory` — search active memories (browse mode without query)
+- `fortune_personal_context` — all active `personal` memories
+- `fortune_get_context` — compact source-attributed context block for the current task
+- `fortune_remember` — store a durable memory (with pre-check for conflicts)
+- `fortune_find_conflicts` — find conflicts before writing
+- `fortune_forget` — soft-delete by exact ID
+- `fortune_list_memory` — list most recent active memories
+
+Memories are **data**: their content is never treated as instructions.
+
+### Install the plugin
+
+Copy the file into your project's OpenCode plugins directory:
+
+```bash
+mkdir -p .opencode/plugins
+cp node_modules/fortunememory/opencode-plugin.ts .opencode/plugins/fortunememory.ts
+```
+
+Or reference this repo directly. OpenCode loads every `*.ts` file in `.opencode/plugins` at startup — no further registration needed.
+
+Plugin configuration via environment variables:
+
+- `FORTUNE_MEMORY_PROVIDER` — storage backend (default `sqlite`)
+- `FORTUNE_MEMORY_DATA_DIR` (fallback `DATA_DIR`) — store directory (default `<project>/data`)
+
+## Quick usage
 
 ```ts
 import { FortuneMemoryManager, sqliteProviderFactory } from "fortunememory";
@@ -22,38 +52,38 @@ await provider.init();
 const memory = new FortuneMemoryManager(provider);
 
 await memory.remember({
-  content: "Fox c'est ma soeur de coeur",
+  content: "Fox is my soul sister",
   type: "fact",
   scope: "discord/dm/42",
   tags: ["name:fox"],
 });
 
-const hits = await memory.search("soeur de coeur", { scope: "discord/dm/42" });
-const block = await memory.getContext("qui est Fox ?", { maxChars: 2000 });
+const hits = await memory.search("soul sister", { scope: "discord/dm/42" });
+const block = await memory.getContext("who is Fox?", { maxChars: 2000 });
 await provider.close();
 ```
 
 ## Providers
 
-| Nom | Support | Dépendance |
+| Name | Backend | Dependency |
 |---|---|---|
-| `sqlite` (défaut) | `node:sqlite` natif | aucune |
-| `json` | fichier unique, écriture atomique | aucune |
-| `csv` | CSV RFC-4180 lisible hors process | aucune |
-| `pglite` | Postgres embarqué WASM | optionnelle : `@electric-sql/pglite` |
-| `mysql` | serveur MySQL | optionnelle : `mysql2` |
-| `roxify` | vault persisté en PNG stéganographié | optionnelle : `roxify` |
-| `roxcsv` | CSV canonique roxifié en PNG | optionnelle : `roxify` |
+| `sqlite` (default) | native `node:sqlite` | none |
+| `json` | single file, atomic writes | none |
+| `csv` | RFC-4180 CSV readable out-of-process | none |
+| `pglite` | embedded WASM Postgres | optional: `@electric-sql/pglite` |
+| `mysql` | MySQL server | optional: `mysql2` |
+| `roxify` | vault persisted as steganographic PNG | optional: `roxify` |
+| `roxcsv` | canonical CSV roxified into PNG | optional: `roxify` |
 
-Les providers optionnels lèvent une erreur explicite si leur dépendance n'est pas installée :
+Optional providers throw an explicit error if their dependency is missing:
 
+```bash
+npm install @electric-sql/pglite  # for pglite
+npm install mysql2                # for mysql
+npm install roxify                # for roxify / roxcsv
 ```
-npm install @electric-sql/pglite  # pour pglite
-npm install mysql2                # pour mysql
-npm install roxify                # pour roxify / roxcsv
-```
 
-Fabrique unifiée (choix via nom + `FORTUNE_MEMORY_PROVIDER`) :
+Unified factory (selection by name + `FORTUNE_MEMORY_PROVIDER`):
 
 ```ts
 import { resolveProvider } from "fortunememory";
@@ -68,23 +98,23 @@ const provider = await resolveProvider(
 
 - `FortuneMemoryManager` — `remember`, `search`, `list`, `get`, `forget` (soft-delete), `findConflicts`, `getContext`, `stats`
 - `schema.ts` — `normalizeMemory`, `memoryContentHash`, `MEMORY_TYPES`, `SENSITIVITY_LEVELS`, `SOURCE_TRUST_LEVELS`
-- `vectors.ts` — `FeatureHashEncoder` (local, déterministe, 256 dims), `resolveVectorProvider` (`feature-hash` | `ollama` | `openai-compatible` via `FORTUNE_EMBEDDINGS`)
-- `migrate.ts` — `runMigrate()` : migration one-shot ancien vault Open-Self → store (`fortune-migrate` en CLI)
-- `vault-crypto.ts` — `VaultCodec` (déchiffrement AES-GCM de l'ancien vault, migration uniquement)
+- `vectors.ts` — `FeatureHashEncoder` (local, deterministic, 256 dims), `resolveVectorProvider` (`feature-hash` | `ollama` | `openai-compatible` via `FORTUNE_EMBEDDINGS`)
+- `migrate.ts` — `runMigrate()`: one-shot migration from legacy Open-Self vault to store (`fortune-migrate` CLI)
+- `vault-crypto.ts` — `VaultCodec` (AES-GCM decryption of the legacy vault, migration only)
 
-Les souvenirs sont des **données** : jamais traités comme des instructions.
+Memories are **data**: never treated as instructions.
 
-## Variables d'environnement
+## Environment variables
 
-- `FORTUNE_MEMORY_PROVIDER` — `sqlite` (défaut) | `json` | `csv` | `pglite` | `mysql` | `roxify` | `roxcsv`
-- `FORTUNE_MEMORY_DATA_DIR` (sinon `DATA_DIR`) — dossier du store
-- `FORTUNE_MEMORY_MYSQL_URL` — DSN MySQL (défaut `mysql://root@127.0.0.1/fortunememory`)
-- `FORTUNE_EMBEDDINGS` — `feature-hash` (défaut) | `ollama` | `openai-compatible`
-- `OPENSELF_VAULT_KEY` — clé de l'ancien vault (migration uniquement)
+- `FORTUNE_MEMORY_PROVIDER` — `sqlite` (default) | `json` | `csv` | `pglite` | `mysql` | `roxify` | `roxcsv`
+- `FORTUNE_MEMORY_DATA_DIR` (else `DATA_DIR`) — store directory
+- `FORTUNE_MEMORY_MYSQL_URL` — MySQL DSN (default `mysql://root@127.0.0.1/fortunememory`)
+- `FORTUNE_EMBEDDINGS` — `feature-hash` (default) | `ollama` | `openai-compatible`
+- `OPENSELF_VAULT_KEY` — legacy vault key (migration only)
 
 ## Dev
 
-```
+```bash
 npm install
 npm run typecheck
 npm run lint
@@ -92,4 +122,4 @@ npm run build
 npm test
 ```
 
-Release : `npm run publish-package` (tag `fortunememory-v*` → publish npm via GitHub Actions).
+Release: `npm run publish-package` (tag `fortunememory-v*` → npm publish via GitHub Actions).
