@@ -10,34 +10,37 @@
 import type { MemoryRecord } from "../schema.ts";
 
 export interface StoredRow {
-  memory: MemoryRecord;
-  vector: number[] | null;
+	memory: MemoryRecord;
+	vector: number[] | null;
 }
 
 export interface FortuneProvider {
-  readonly name: string;
+	readonly name: string;
 
-  /** Création idempotente des tables / fichiers. */
-  init(): Promise<void>;
+	/** Création idempotente des tables / fichiers. */
+	init(): Promise<void>;
 
-  close(): Promise<void>;
+	close(): Promise<void>;
 
-  /** Insertion complète (record déjà normalisé + vecteur encodé ou null). */
-  addMemory(memory: MemoryRecord, vector: number[] | null): Promise<void>;
+	/** Insertion complète (record déjà normalisé + vecteur encodé ou null). */
+	addMemory(memory: MemoryRecord, vector: number[] | null): Promise<void>;
 
-  /** Soft-delete : status=forgotten + forgottenAt. Retourne false si id inconnu. */
-  updateStatus(
-    id: string,
-    status: "active" | "forgotten",
-    at: string,
-  ): Promise<boolean>;
+	/** Soft-delete : status=forgotten + forgottenAt. Retourne false si id inconnu. */
+	updateStatus(
+		id: string,
+		status: "active" | "forgotten",
+		at: string,
+	): Promise<boolean>;
 
-  /** Un record ou null (includeForgotten pour ressortir un oublié). */
-  getMemory(id: string, includeForgotten?: boolean): Promise<MemoryRecord | null>;
+	/** Un record ou null (includeForgotten pour ressortir un oublié). */
+	getMemory(
+		id: string,
+		includeForgotten?: boolean,
+	): Promise<MemoryRecord | null>;
 
-  /** Itère tous les souvenirs (status actif par défaut). */
-  iterate(includeForgotten?: boolean): AsyncIterable<StoredRow>;
+	/** Itère tous les souvenirs (status actif par défaut). */
+	iterate(includeForgotten?: boolean): AsyncIterable<StoredRow>;
 
-  /** Nombre de souvenirs actifs (stats). */
-  count(): Promise<{ active: number; forgotten: number }>;
+	/** Nombre de souvenirs actifs (stats). */
+	count(): Promise<{ active: number; forgotten: number }>;
 }

@@ -58,9 +58,9 @@ export async function openSqliteDatabase(
 						),
 					}),
 					get: (params) =>
-						(hasParams(params)
-							? stmt.get(params)
-							: stmt.get()) as SqliteRow | undefined,
+						(hasParams(params) ? stmt.get(params) : stmt.get()) as
+							| SqliteRow
+							| undefined,
 					all: (params) =>
 						(hasParams(params) ? stmt.all(params) : stmt.all()) as SqliteRow[],
 				};
@@ -98,7 +98,7 @@ async function openBunSqlite(
 		};
 	};
 	try {
-		// @ts-ignore bun:sqlite n'existe que sous Bun (@types/bun non requis par la lib)
+		// @ts-expect-error bun:sqlite n'existe que sous Bun (@types/bun non requis par la lib)
 		mod = await import("bun:sqlite");
 	} catch {
 		throw new Error(
@@ -184,7 +184,8 @@ export class SqliteProvider implements FortuneProvider {
 	}
 
 	private require(): SqliteDatabase {
-		if (!this.db) throw new Error("SqliteProvider pas initialisé (init() d'abord)");
+		if (!this.db)
+			throw new Error("SqliteProvider pas initialisé (init() d'abord)");
 		return this.db;
 	}
 
@@ -232,11 +233,13 @@ export class SqliteProvider implements FortuneProvider {
 		};
 	}
 
-	async addMemory(memory: MemoryRecord, vector: number[] | null): Promise<void> {
-		memory.contentHash = memory.contentHash ?? memoryContentHash(memory.content);
-		this.require()
-			.prepare(INSERT)
-			.run(this.memoryToParams(memory, vector));
+	async addMemory(
+		memory: MemoryRecord,
+		vector: number[] | null,
+	): Promise<void> {
+		memory.contentHash =
+			memory.contentHash ?? memoryContentHash(memory.content);
+		this.require().prepare(INSERT).run(this.memoryToParams(memory, vector));
 	}
 
 	async updateStatus(
@@ -291,7 +294,10 @@ export class SqliteProvider implements FortuneProvider {
          FROM fortune_memories`,
 			)
 			.get() as unknown as { active: number; forgotten: number };
-		return { active: Number(row.active) || 0, forgotten: Number(row.forgotten) || 0 };
+		return {
+			active: Number(row.active) || 0,
+			forgotten: Number(row.forgotten) || 0,
+		};
 	}
 }
 
@@ -319,8 +325,12 @@ function rowToMemory(row: Record<string, unknown>): MemoryRecord {
 			title: (row.source_title as string | null) ?? null,
 		},
 		scope: String(row.scope ?? "personal"),
-		sensitivity: String(row.sensitivity ?? "personal") as MemoryRecord["sensitivity"],
-		sourceTrust: String(row.source_trust ?? "owner") as MemoryRecord["sourceTrust"],
+		sensitivity: String(
+			row.sensitivity ?? "personal",
+		) as MemoryRecord["sensitivity"],
+		sourceTrust: String(
+			row.source_trust ?? "owner",
+		) as MemoryRecord["sourceTrust"],
 		confidence: Number(row.confidence ?? 1) || 0,
 		validFrom: (row.valid_from as string | null) ?? null,
 		validTo: (row.valid_to as string | null) ?? null,

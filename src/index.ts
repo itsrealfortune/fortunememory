@@ -50,8 +50,17 @@ export {
 	csvParse,
 	csvProviderFactory,
 } from "./providers/csv.ts";
-export { SqliteProvider, openSqliteDatabase, sqliteProviderFactory } from "./providers/sqlite.ts";
-export type { SqliteDatabase, SqliteParams, SqliteRow, SqliteStatement } from "./providers/sqlite.ts";
+export {
+	SqliteProvider,
+	openSqliteDatabase,
+	sqliteProviderFactory,
+} from "./providers/sqlite.ts";
+export type {
+	SqliteDatabase,
+	SqliteParams,
+	SqliteRow,
+	SqliteStatement,
+} from "./providers/sqlite.ts";
 export { MysqlProvider, PgliteProvider } from "./providers/sql.ts";
 export { RoxifyProvider, roxifyProviderFactory } from "./providers/roxify.ts";
 export {
