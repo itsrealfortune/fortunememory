@@ -1,6 +1,6 @@
 {
 	"name": "fortunememory",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"license": "MIT",
 	"description": "Mémoire durable locale pour agents : search hybride (lexical + vectoriel RRF), conflits, contextes attribués. Zéro réseau par défaut, provider sqlite natif.",
 	"repository": {
