@@ -15,7 +15,7 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 
 VERSION="$(node -p "JSON.parse(require('fs').readFileSync('./package.json', 'utf8')).version")"
-TAG="fortunememory-v${VERSION}"
+TAG="v${VERSION}"
 
 if [[ -z "${VERSION}" ]]; then
   echo "Error: package.json version is empty."
