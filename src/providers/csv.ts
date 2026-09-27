@@ -13,7 +13,11 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { memoryContentHash, type MemoryRecord } from "../schema.ts";
-import type { FortuneProvider, StoredRow } from "./interface.ts";
+import type {
+	FortuneProvider,
+	IterateOptions,
+	StoredRow,
+} from "./interface.ts";
 
 export const HEADER = [
 	"id",
@@ -38,17 +42,28 @@ export const HEADER = [
 	"vector",
 ];
 
+const CSV_NEEDS_QUOTE_RE = /[",\r\n]/;
+const CSV_QUOTE_RE = /"/g;
+
 function csvEscape(value: unknown): string {
 	const text = value === null || value === undefined ? "" : String(value);
-	return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+	return CSV_NEEDS_QUOTE_RE.test(text)
+		? `"${text.replace(CSV_QUOTE_RE, '""')}"`
+		: text;
 }
 
 /** Texte → tableau de cellules (parser minuscule, sans dépendance). */
 export function csvParse(text: string): string[][] {
 	const rows: string[][] = [];
 	let row: string[] = [];
+	let segments: string[] = [];
 	let field = "";
 	let inQuotes = false;
+	const pushField = (): void => {
+		row.push(segments.length ? segments.join("") + field : field);
+		segments = [];
+		field = "";
+	};
 	for (let index = 0; index < text.length; index++) {
 		const char = text[index]!;
 		if (inQuotes) {
@@ -59,26 +74,37 @@ export function csvParse(text: string): string[][] {
 				} else {
 					inQuotes = false;
 				}
+			} else if (char === "\n" || char === "\r") {
+				segments.push(field);
+				field = "";
+				// Newlines dans quotes : on garde le char tel quel via segments.
+				segments.push(char);
 			} else {
 				field += char;
+				if (field.length >= 1024) {
+					segments.push(field);
+					field = "";
+				}
 			}
 		} else if (char === '"') {
 			inQuotes = true;
 		} else if (char === ",") {
-			row.push(field);
-			field = "";
+			pushField();
 		} else if (char === "\n" || char === "\r") {
 			if (char === "\r" && text[index + 1] === "\n") index += 1;
-			row.push(field);
+			pushField();
 			if (row.length > 1 || row[0] !== "") rows.push(row);
 			row = [];
-			field = "";
 		} else {
 			field += char;
+			if (field.length >= 1024) {
+				segments.push(field);
+				field = "";
+			}
 		}
 	}
-	if (field || row.length) {
-		row.push(field);
+	if (field || segments.length || row.length) {
+		pushField();
 		if (row.length > 1 || row[0] !== "") rows.push(row);
 	}
 	return rows;
@@ -118,6 +144,7 @@ export class CsvProvider implements FortuneProvider {
 	readonly name = "csv";
 	private readonly filePath: string;
 	private rows: StoredRow[] = [];
+	private readonly index = new Map<string, number>();
 
 	constructor(filePath: string) {
 		this.filePath = filePath;
@@ -137,6 +164,10 @@ export class CsvProvider implements FortuneProvider {
 						memory: rowToMemory(record),
 						vector: parseVector(record.vector ?? null),
 					});
+					this.index.set(
+						this.rows[this.rows.length - 1]!.memory.id,
+						this.rows.length - 1,
+					);
 				} catch {
 					// ligne corrompue : on la saute, on ne crash pas tout le vault
 				}
@@ -156,6 +187,7 @@ export class CsvProvider implements FortuneProvider {
 		vector: number[] | null,
 	): Promise<void> {
 		const row: StoredRow = { memory, vector };
+		this.index.set(memory.id, this.rows.length);
 		this.rows.push(row);
 		appendFileSync(this.filePath, csvLine(row));
 	}
@@ -165,7 +197,8 @@ export class CsvProvider implements FortuneProvider {
 		status: "active" | "forgotten",
 		at: string,
 	): Promise<boolean> {
-		const row = this.rows.find((candidate) => candidate.memory.id === id);
+		const slot = this.index.get(id);
+		const row = slot !== undefined ? this.rows[slot] : undefined;
 		if (!row) return false;
 		row.memory.status = status;
 		row.memory.forgottenAt = status === "forgotten" ? at : null;
@@ -178,17 +211,27 @@ export class CsvProvider implements FortuneProvider {
 		id: string,
 		includeForgotten = false,
 	): Promise<MemoryRecord | null> {
-		const row = this.rows.find(
-			(candidate) =>
-				candidate.memory.id === id &&
-				(includeForgotten || candidate.memory.status === "active"),
-		);
-		return row?.memory ?? null;
+		const slot = this.index.get(id);
+		const row = slot !== undefined ? this.rows[slot] : undefined;
+		if (row && (includeForgotten || row.memory.status === "active")) {
+			return row.memory;
+		}
+		return null;
 	}
 
-	async *iterate(includeForgotten = false): AsyncIterable<StoredRow> {
-		for (const row of [...this.rows]) {
+	async *iterate(
+		includeForgotten = false,
+		opts: IterateOptions = {},
+	): AsyncIterable<StoredRow> {
+		const prefix = opts.scopePrefix;
+		for (const row of this.rows) {
 			if (!includeForgotten && row.memory.status !== "active") continue;
+			if (
+				prefix &&
+				row.memory.scope !== prefix &&
+				!row.memory.scope.startsWith(`${prefix}/`)
+			)
+				continue;
 			yield row;
 		}
 	}
@@ -221,13 +264,12 @@ function rewriteFile(
 	rows: Array<{ memory: MemoryRecord; vector: number[] | null }>,
 ): void {
 	const tmp = `${filePath}.tmp`;
-	const body = rows.length
-		? rows
-				.map((row) => memoryToCells(row))
-				.map(csvLineText)
-				.join("")
-		: "";
-	writeFileSync(tmp, `${HEADER.join(",")}\n${body}`);
+	const lines = new Array<string>(rows.length + 1);
+	lines[0] = `${HEADER.join(",")}\n`;
+	for (let i = 0; i < rows.length; i++) {
+		lines[i + 1] = csvLineText(memoryToCells(rows[i]!));
+	}
+	writeFileSync(tmp, lines.join(""));
 	renameSync(tmp, filePath);
 }
 

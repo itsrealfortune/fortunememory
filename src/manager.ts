@@ -26,6 +26,7 @@ import {
 import {
 	FeatureHashEncoder,
 	cosineSimilarity,
+	dotProduct,
 	tokenize,
 	type VectorProvider,
 } from "./vectors.ts";
@@ -51,15 +52,18 @@ export interface ContextOptions extends SearchOptions {
 	maxChars?: number;
 }
 
-const TRUST_RANK = (value: string): number => {
-	const rank = (SOURCE_TRUST_LEVELS as readonly string[]).indexOf(value);
-	return rank < 0
-		? (SOURCE_TRUST_LEVELS as readonly string[]).indexOf("owner")
-		: rank;
-};
+const TRUST_RANK_MAP = new Map<string, number>(
+	SOURCE_TRUST_LEVELS.map((value, index) => [value, index]),
+);
+const SENSITIVITY_RANK_MAP = new Map<string, number>(
+	SENSITIVITY_LEVELS.map((value, index) => [value, index]),
+);
+
+const TRUST_RANK = (value: string): number =>
+	TRUST_RANK_MAP.get(value) ?? TRUST_RANK_MAP.get("owner")!;
 
 const SENSITIVITY_RANK = (value: string): number =>
-	(SENSITIVITY_LEVELS as readonly string[]).indexOf(value);
+	SENSITIVITY_RANK_MAP.get(value) ?? -1;
 
 const clamp = (value: number, min: number, max: number): number =>
 	Math.min(max, Math.max(min, Number(value)));
@@ -72,10 +76,29 @@ export interface ConflictCandidate {
 export class FortuneMemoryManager {
 	readonly provider: FortuneProvider;
 	readonly vectorProvider: VectorProvider;
+	/** Cache tokens lexicaux par id : évite re-tokenize à chaque search. */
+	private readonly lexicalCache = new Map<string, Set<string>>();
+	private static readonly LEXICAL_CACHE_LIMIT = 10_000;
 
 	constructor(provider: FortuneProvider, vectors?: VectorProvider) {
 		this.provider = provider;
 		this.vectorProvider = vectors ?? new FeatureHashEncoder();
+	}
+
+	private lexicalTokens(memory: MemoryRecord): Set<string> {
+		let cached = this.lexicalCache.get(memory.id);
+		if (!cached) {
+			cached = new Set(
+				contentTokens(
+					`${memory.content} ${memory.summary} ${memory.tags.join(" ")}`,
+				),
+			);
+			if (this.lexicalCache.size >= FortuneMemoryManager.LEXICAL_CACHE_LIMIT) {
+				this.lexicalCache.clear();
+			}
+			this.lexicalCache.set(memory.id, cached);
+		}
+		return cached;
 	}
 
 	// ── Écriture ────────────────────────────────────────────────────────────
@@ -91,6 +114,7 @@ export class FortuneMemoryManager {
 		);
 		if (duplicate) return duplicate;
 		await this.provider.addMemory(memory, await this.encodeMemory(memory));
+		this.lexicalCache.delete(memory.id);
 		return memory;
 	}
 
@@ -99,7 +123,10 @@ export class FortuneMemoryManager {
 		hash: string,
 		scope: string,
 	): Promise<MemoryRecord | null> {
-		for await (const row of this.provider.iterate(false)) {
+		for await (const row of this.provider.iterate(false, {
+			withVectors: false,
+			scopePrefix: scope,
+		})) {
 			const existing = row.memory;
 			const existingHash =
 				existing.contentHash ?? memoryContentHash(existing.content);
@@ -109,6 +136,13 @@ export class FortuneMemoryManager {
 		return null;
 	}
 
+	private similarity(left: number[], right: number[]): number {
+		// Vecteurs FeatureHashEncoder déjà L2-normés → simple dot, sans sqrt.
+		if (this.vectorProvider instanceof FeatureHashEncoder) {
+			return dotProduct(left, right);
+		}
+		return cosineSimilarity(left, right);
+	}
 	private async encodeMemory(memory: MemoryRecord): Promise<number[] | null> {
 		try {
 			const text = `${memory.content}\n${memory.summary}\n${memory.tags.join(" ")}`;
@@ -133,7 +167,9 @@ export class FortuneMemoryManager {
 	 */
 	async forget(id: string): Promise<boolean> {
 		const now = new Date().toISOString();
-		return this.provider.updateStatus(id, "forgotten", now);
+		const forgotten = await this.provider.updateStatus(id, "forgotten", now);
+		if (forgotten) this.lexicalCache.delete(id);
+		return forgotten;
 	}
 
 	async stats(): Promise<{
@@ -160,27 +196,20 @@ export class FortuneMemoryManager {
 	): Promise<MemoryRecord[]> {
 		const limit = clamp(options.limit ?? 20, 1, 100);
 		const candidates = await this.filterRows(
-			this.iterActive(),
+			this.provider.iterate(false, {
+				withVectors: false,
+				scopePrefix: options.scope,
+			}),
 			options,
-			undefined,
 		);
-		candidates.sort((left, right) =>
-			compareDate(
-				right,
-				left,
-				(m) => m.occurredAt || m.validFrom || m.createdAt,
+		const decorated = candidates.map((row) => ({
+			row,
+			ts: parseDate(
+				row.memory.occurredAt || row.memory.validFrom || row.memory.createdAt,
 			),
-		);
-		return candidates.slice(0, limit).map((row) => row.memory);
-	}
-
-	private async *iterActive(): AsyncGenerator<{
-		memory: MemoryRecord;
-		vector: number[] | null;
-	}> {
-		for await (const row of this.provider.iterate(false)) {
-			yield { memory: row.memory, vector: row.vector };
-		}
+		}));
+		decorated.sort((left, right) => right.ts - left.ts);
+		return decorated.slice(0, limit).map((entry) => entry.row.memory);
 	}
 
 	// ── Recherche ───────────────────────────────────────────────────────────
@@ -192,7 +221,14 @@ export class FortuneMemoryManager {
 		const limit = clamp(options.limit ?? 10, 1, 50);
 		const retrieval = (options.retrieval ?? "hybrid") as RetrievalMode;
 
-		const rows = await this.filterRows(this.iterActive(), options, query);
+		const rows = await this.filterRows(
+			this.provider.iterate(false, {
+				withVectors: retrieval !== "lexical",
+				scopePrefix: options.scope,
+			}),
+			options,
+		);
+		if (!rows.length) return [];
 		const queryTokens = tokenize(query);
 		if (!queryTokens.length) {
 			return rows.slice(0, limit).map((row) => row.memory);
@@ -211,7 +247,6 @@ export class FortuneMemoryManager {
 				options,
 				await this.vectorProvider.encode(query),
 				candidateLimit,
-				options.excludeContent,
 			);
 		}
 
@@ -239,13 +274,12 @@ export class FortuneMemoryManager {
 		if (!queryTokens.length) return [];
 
 		const rows = await this.filterRows(
-			this.iterActive(),
+			this.provider.iterate(false, { scopePrefix: input.scope }),
 			{
 				scope: input.scope,
 				type: String(input.type) as MemoryType,
 				maxSensitivity: "restricted",
 			},
-			undefined,
 		);
 		const queryVector = await this.vectorProvider.encode(input.content);
 
@@ -263,7 +297,7 @@ export class FortuneMemoryManager {
 		for (const row of rows) {
 			if (!row.vector) continue;
 			if (row.memory.content === input.content) continue;
-			const vectorScore = cosineSimilarity(queryVector, row.vector);
+			const vectorScore = this.similarity(queryVector, row.vector);
 			if (vectorScore >= threshold) {
 				candidates.push({ memory: row.memory, vectorScore });
 			}
@@ -326,7 +360,6 @@ export class FortuneMemoryManager {
 	private async filterRows(
 		iter: AsyncIterable<{ memory: MemoryRecord; vector: number[] | null }>,
 		options: SearchOptions & { asOf?: string },
-		_query: string | undefined,
 	): Promise<Array<{ memory: MemoryRecord; vector: number[] | null }>> {
 		const asOf = options.asOf ?? new Date().toISOString();
 		const asOfTime = Date.parse(asOf);
@@ -364,8 +397,7 @@ export class FortuneMemoryManager {
 		);
 		const scored: Array<{ hit: SearchHit; lexicalScore: number }> = [];
 		for (const row of rows) {
-			const docs = `${row.memory.content} ${row.memory.summary} ${row.memory.tags.join(" ")}`;
-			const tokens = new Set(contentTokens(docs));
+			const tokens = this.lexicalTokens(row.memory);
 			if (!tokens.size) continue;
 			let overlap = 0;
 			for (const token of meaningful) {
@@ -396,14 +428,12 @@ export class FortuneMemoryManager {
 		options: SearchOptions,
 		queryVector: number[],
 		limit: number,
-		excludedContent?: string,
 	): Promise<SearchHit[]> {
 		const minimum = options.minVectorScore ?? 0.08;
 		const candidates: SearchHit[] = [];
 		for (const row of rows) {
 			if (!row.vector) continue;
-			if (excludedContent && row.memory.content === excludedContent) continue;
-			const vectorScore = cosineSimilarity(queryVector, row.vector);
+			const vectorScore = this.similarity(queryVector, row.vector);
 			if (vectorScore < minimum) continue;
 			candidates.push({ memory: row.memory, vectorScore });
 		}
@@ -540,7 +570,7 @@ function fuseRankings(
 		if (kind === "lexical") current.lexicalRank = rank;
 		if (kind === "vector") {
 			current.vectorRank = rank;
-			current.vectorSimilarity = Number(hit.vectorScore!.toFixed(4));
+			current.vectorSimilarity = hit.vectorScore ?? null;
 		}
 		fused.set(hit.memory.id, current);
 	};
@@ -567,7 +597,10 @@ function fuseRankings(
 		match: {
 			lexicalRank: item.lexicalRank,
 			vectorRank: item.vectorRank,
-			vectorSimilarity: item.vectorSimilarity,
+			vectorSimilarity:
+				item.vectorSimilarity === null
+					? null
+					: Number(item.vectorSimilarity.toFixed(4)),
 		},
 	}));
 }
@@ -576,14 +609,10 @@ function scopeMatches(scope: string, filter: string): boolean {
 	return scope === filter || scope.startsWith(`${filter}/`);
 }
 
-function compareDate(
-	left: { memory: MemoryRecord },
-	right: { memory: MemoryRecord },
-	pick: (memory: MemoryRecord) => string | null | undefined,
-): number {
-	const l = pick(left.memory) ?? left.memory.createdAt;
-	const r = pick(right.memory) ?? right.memory.createdAt;
-	return Date.parse(r) - Date.parse(l);
+function parseDate(value: string | null | undefined): number {
+	if (!value) return Number.NaN;
+	const time = Date.parse(value);
+	return time;
 }
 
 function clip(text: string, max: number): string {

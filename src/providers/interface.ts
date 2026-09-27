@@ -14,6 +14,13 @@ export interface StoredRow {
 	vector: number[] | null;
 }
 
+export interface IterateOptions {
+	/** Ne pas charger/parser les vecteurs (chemins lexical/list/dedup). */
+	withVectors?: boolean;
+	/** Restreint au scope exact ou préfixe `scope/` (poussé en SQL si possible). */
+	scopePrefix?: string;
+}
+
 export interface FortuneProvider {
 	readonly name: string;
 
@@ -38,8 +45,13 @@ export interface FortuneProvider {
 		includeForgotten?: boolean,
 	): Promise<MemoryRecord | null>;
 
-	/** Itère tous les souvenirs (status actif par défaut). */
-	iterate(includeForgotten?: boolean): AsyncIterable<StoredRow>;
+	/** Itère les souvenirs (status actif par défaut). withVectors=false
+	 * évite le transfert/parse des vecteurs ; scopePrefix pousse le filtre
+	 * scope en SQL quand le backend le supporte. */
+	iterate(
+		includeForgotten?: boolean,
+		opts?: IterateOptions,
+	): AsyncIterable<StoredRow>;
 
 	/** Nombre de souvenirs actifs (stats). */
 	count(): Promise<{ active: number; forgotten: number }>;

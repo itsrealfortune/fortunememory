@@ -37,6 +37,7 @@ export type {
 export {
 	FeatureHashEncoder,
 	cosineSimilarity,
+	dotProduct,
 	resolveVectorProvider,
 	tokenize,
 } from "./vectors.ts";
