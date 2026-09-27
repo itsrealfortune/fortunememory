@@ -265,15 +265,20 @@ jobs:
     steps:
       - run: |
           echo "## CI Gates Results" >> $GITHUB_STEP_SUMMARY
-          for job in check lint tests build audit benchmark strict-tsc deps docs test-matrix; do
-            result="${{ needs[job].result }}"
-            echo "- **${job}**: ${result}" >> $GITHUB_STEP_SUMMARY
+          echo "- **check**: ${{ needs.check.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **lint**: ${{ needs.lint.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **tests**: ${{ needs.tests.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **build**: ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **audit**: ${{ needs.audit.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **benchmark**: ${{ needs.benchmark.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **strict-tsc**: ${{ needs.strict-tsc.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **deps**: ${{ needs.deps.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **docs**: ${{ needs.docs.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **test-matrix**: ${{ needs.test-matrix.result }}" >> $GITHUB_STEP_SUMMARY
+          for result in             "${{ needs.check.result }}"             "${{ needs.lint.result }}"             "${{ needs.tests.result }}"             "${{ needs.build.result }}"             "${{ needs.audit.result }}"             "${{ needs.benchmark.result }}"             "${{ needs.strict-tsc.result }}"             "${{ needs.deps.result }}"             "${{ needs.docs.result }}"             "${{ needs.test-matrix.result }}"; do
             if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
-              FAIL=1
+              echo "❌ Some gates failed"
+              exit 1
             fi
           done
-          if [ "$FAIL" = "1" ]; then
-            echo "❌ Some gates failed"
-            exit 1
-          fi
           echo "✅ All gates passed"
