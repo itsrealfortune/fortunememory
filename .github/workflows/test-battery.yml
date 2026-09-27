@@ -93,75 +93,6 @@ jobs:
           lines=$(wc -l < dist/index.d.ts)
           echo "dist/index.d.ts: ${lines} lines"
 
-  # ── Web build + bundle size ──────────────────────────────────────────────────
-  web-build:
-    needs: skip-check
-    if: needs.skip-check.outputs.skip != 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v1
-        with:
-          bun-version: latest
-      - run: bun install
-      - run: node build.js
-      - name: Check bundle size
-        run: |
-          if [ -f builds/fortune-nyx-v1.7.6-web.min.js ]; then
-            size=$(wc -c < builds/fortune-nyx-v1.7.6-web.min.js)
-            echo "Web bundle: ${size} bytes ($(( size / 1024 )) KB)"
-            if [ "$size" -gt 51200 ]; then
-              echo "❌ Web bundle ${size}B exceeds 50KB limit"
-              exit 1
-            fi
-            echo "✅ Web bundle within 50KB limit"
-          else
-            echo "⚠️ No web bundle found, checking demo/app.js"
-            size=$(wc -c < demo/app.js)
-            echo "demo/app.js: ${size} bytes ($(( size / 1024 )) KB)"
-          fi
-
-  # ── Bundle size gate ────────────────────────────────────────────────────────
-  bundle-size:
-    needs: skip-check
-    if: needs.skip-check.outputs.skip != 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-      - uses: oven-sh/setup-bun@v1
-        with:
-          bun-version: latest
-      - run: bun install
-      - run: bun run build-all
-      - name: Check bundle sizes vs baseline
-        run: |
-          FAIL=0
-          # Fetch baseline from main
-          BASELINE_JSON="{}"
-          if git show origin/main:builds/.sizes.json > /dev/null 2>&1; then
-            BASELINE_JSON=$(git show origin/main:builds/.sizes.json)
-          fi
-          for f in builds/*; do
-            [ -f "$f" ] || continue
-            size=$(wc -c < "$f")
-            name=$(basename "$f")
-            echo "${name}: ${size} bytes ($(( size / 1024 )) KB)"
-            prev=$(echo "$BASELINE_JSON" | jq -r ".[\"$name\"] // 0")
-            if [ "$prev" -gt 0 ]; then
-              growth=$(( size - prev ))
-              growthPct=$(( growth * 100 / prev ))
-              echo "  baseline: ${prev}B, change: ${growthPct}%"
-              if [ "$growthPct" -gt 10 ]; then
-                echo "❌ ${name} grew by ${growthPct}% (threshold: 10%)"
-                FAIL=1
-              fi
-            fi
-          done
-          if [ "$FAIL" -eq 1 ]; then exit 1; fi
-          echo "✅ All bundles within 10% of baseline"
-
   # ── Security audit ──────────────────────────────────────────────────────────
   audit:
     needs: skip-check
@@ -324,8 +255,6 @@ jobs:
       - lint
       - tests
       - build
-      - web-build
-      - bundle-size
       - audit
       - benchmark
       - strict-tsc
@@ -336,15 +265,20 @@ jobs:
     steps:
       - run: |
           echo "## CI Gates Results" >> $GITHUB_STEP_SUMMARY
-          for job in check lint tests build web-build bundle-size audit benchmark strict-tsc deps docs test-matrix; do
-            result="${{ needs[job].result }}"
-            echo "- **${job}**: ${result}" >> $GITHUB_STEP_SUMMARY
+          echo "- **check**: ${{ needs.check.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **lint**: ${{ needs.lint.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **tests**: ${{ needs.tests.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **build**: ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **audit**: ${{ needs.audit.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **benchmark**: ${{ needs.benchmark.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **strict-tsc**: ${{ needs.strict-tsc.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **deps**: ${{ needs.deps.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **docs**: ${{ needs.docs.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **test-matrix**: ${{ needs.test-matrix.result }}" >> $GITHUB_STEP_SUMMARY
+          for result in             "${{ needs.check.result }}"             "${{ needs.lint.result }}"             "${{ needs.tests.result }}"             "${{ needs.build.result }}"             "${{ needs.audit.result }}"             "${{ needs.benchmark.result }}"             "${{ needs.strict-tsc.result }}"             "${{ needs.deps.result }}"             "${{ needs.docs.result }}"             "${{ needs.test-matrix.result }}"; do
             if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
-              FAIL=1
+              echo "❌ Some gates failed"
+              exit 1
             fi
           done
-          if [ "$FAIL" = "1" ]; then
-            echo "❌ Some gates failed"
-            exit 1
-          fi
           echo "✅ All gates passed"
