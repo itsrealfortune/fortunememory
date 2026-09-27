@@ -192,6 +192,24 @@ export class CsvProvider implements FortuneProvider {
 		appendFileSync(this.filePath, csvLine(row));
 	}
 
+	async addMany(
+		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+	): Promise<void> {
+		if (!entries.length) return;
+		const base = this.rows.length;
+		const lines = new Array<string>(entries.length);
+		for (let i = 0; i < entries.length; i++) {
+			const row: StoredRow = {
+				memory: entries[i]!.memory,
+				vector: entries[i]!.vector,
+			};
+			this.index.set(row.memory.id, base + i);
+			this.rows.push(row);
+			lines[i] = csvLine(row);
+		}
+		appendFileSync(this.filePath, lines.join(""));
+	}
+
 	async updateStatus(
 		id: string,
 		status: "active" | "forgotten",
@@ -233,10 +251,7 @@ export class CsvProvider implements FortuneProvider {
 				!row.memory.scope.startsWith(`${prefix}/`)
 			)
 				continue;
-			if (
-				asOf &&
-				!inWindow(row.memory.validFrom, row.memory.validTo, asOf)
-			)
+			if (asOf && !inWindow(row.memory.validFrom, row.memory.validTo, asOf))
 				continue;
 			yield row;
 		}

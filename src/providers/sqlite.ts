@@ -17,10 +17,7 @@ import type {
 	IterateOptions,
 	StoredRow,
 } from "./interface.ts";
-import {
-	decodeVectorBlob,
-	encodeVectorBlob,
-} from "../vectors.ts";
+import { decodeVectorBlob, encodeVectorBlob } from "../vectors.ts";
 
 /** Ligne SQLite brute. */
 export type SqliteRow = Record<string, unknown>;
@@ -320,6 +317,30 @@ export class SqliteProvider implements FortuneProvider {
 		memory.contentHash =
 			memory.contentHash ?? memoryContentHash(memory.content);
 		this.statement(INSERT).run(this.memoryToParams(memory, vector));
+	}
+
+	async addMany(
+		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+	): Promise<void> {
+		if (!entries.length) return;
+		const db = this.require();
+		const insert = this.statement(INSERT);
+		db.exec("BEGIN IMMEDIATE;");
+		try {
+			for (const entry of entries) {
+				entry.memory.contentHash =
+					entry.memory.contentHash ?? memoryContentHash(entry.memory.content);
+				insert.run(this.memoryToParams(entry.memory, entry.vector));
+			}
+			db.exec("COMMIT;");
+		} catch (error) {
+			try {
+				db.exec("ROLLBACK;");
+			} catch {
+				// Déjà en erreur, on propage l'originale.
+			}
+			throw error;
+		}
 	}
 
 	async updateStatus(

@@ -309,10 +309,7 @@ export function decodeVectorBlob(raw: Uint8Array): number[] | null {
 }
 
 /** Blob binaire préféré, repli JSON legacy. */
-export function parseVectorBlob(
-	blob: unknown,
-	json: unknown,
-): number[] | null {
+export function parseVectorBlob(blob: unknown, json: unknown): number[] | null {
 	if (
 		typeof Uint8Array !== "undefined" &&
 		(blob instanceof Uint8Array ||

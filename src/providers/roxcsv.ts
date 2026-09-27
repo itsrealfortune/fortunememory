@@ -111,6 +111,27 @@ export class RoxifiedCSVProvider implements FortuneProvider {
 		await this.flush();
 	}
 
+	async addMany(
+		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+	): Promise<void> {
+		if (!entries.length) return;
+		for (const entry of entries) {
+			entry.memory.contentHash =
+				entry.memory.contentHash ?? memoryContentHash(entry.memory.content);
+			const slot = this.index.get(entry.memory.id);
+			const stored: StoredRow = {
+				memory: entry.memory,
+				vector: entry.vector,
+			};
+			if (slot !== undefined) this.rows[slot] = stored;
+			else {
+				this.index.set(entry.memory.id, this.rows.length);
+				this.rows.push(stored);
+			}
+		}
+		await this.flush();
+	}
+
 	async updateStatus(
 		id: string,
 		status: "active" | "forgotten",
@@ -152,10 +173,7 @@ export class RoxifiedCSVProvider implements FortuneProvider {
 				!row.memory.scope.startsWith(`${prefix}/`)
 			)
 				continue;
-			if (
-				asOf &&
-				!inWindow(row.memory.validFrom, row.memory.validTo, asOf)
-			)
+			if (asOf && !inWindow(row.memory.validFrom, row.memory.validTo, asOf))
 				continue;
 			yield row;
 		}

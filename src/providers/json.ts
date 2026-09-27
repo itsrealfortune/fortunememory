@@ -87,6 +87,26 @@ export class JsonProvider implements FortuneProvider {
 		this.setRow(memory, vector);
 	}
 
+	async addMany(
+		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+	): Promise<void> {
+		if (!entries.length) return;
+		for (const entry of entries) {
+			const known = this.index.get(entry.memory.id);
+			const stored: StoredRow = {
+				memory: entry.memory,
+				vector: entry.vector,
+			};
+			if (known !== undefined) this.rows[known] = stored;
+			else {
+				this.index.set(entry.memory.id, this.rows.length);
+				this.rows.push(stored);
+			}
+		}
+		this.dirty = true;
+		this.flush();
+	}
+
 	async updateStatus(
 		id: string,
 		status: "active" | "forgotten",
@@ -129,10 +149,7 @@ export class JsonProvider implements FortuneProvider {
 				!row.memory.scope.startsWith(`${prefix}/`)
 			)
 				continue;
-			if (
-				asOf &&
-				!inWindow(row.memory.validFrom, row.memory.validTo, asOf)
-			)
+			if (asOf && !inWindow(row.memory.validFrom, row.memory.validTo, asOf))
 				continue;
 			yield row;
 		}

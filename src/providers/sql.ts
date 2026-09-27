@@ -172,6 +172,33 @@ export class PgliteProvider implements FortuneProvider {
 		await client.query(UPSERT_SQL, this.memoryToParams(memory, vector));
 	}
 
+	async addMany(
+		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+	): Promise<void> {
+		if (!entries.length) return;
+		const width = COLUMNS.length;
+		const groups = new Array<string>(entries.length);
+		const params: unknown[] = [];
+		for (let i = 0; i < entries.length; i++) {
+			const entry = entries[i]!;
+			entry.memory.contentHash =
+				entry.memory.contentHash ?? memoryContentHash(entry.memory.content);
+			const row = this.memoryToParams(entry.memory, entry.vector);
+			const base = i * width;
+			const placeholders = new Array<string>(width);
+			for (let c = 0; c < width; c++) {
+				placeholders[c] = `$${base + c + 1}`;
+				params.push(row[c]);
+			}
+			groups[i] = `(${placeholders.join(", ")})`;
+		}
+		const client = await this.require();
+		await client.query(
+			`INSERT INTO fortune_memories (${COLUMNS.join(", ")}) VALUES ${groups.join(", ")} ${UPSERT_SQL.slice(UPSERT_SQL.indexOf("ON CONFLICT"))}`,
+			params,
+		);
+	}
+
 	async updateStatus(
 		id: string,
 		status: "active" | "forgotten",
@@ -226,10 +253,7 @@ export class PgliteProvider implements FortuneProvider {
 		for (const row of result.rows ?? []) {
 			yield {
 				memory: rowToMemory(row as never),
-				vector:
-					opts.withVectors === false
-						? null
-						: parseVector(row as never),
+				vector: opts.withVectors === false ? null : parseVector(row as never),
 			};
 		}
 	}
@@ -370,6 +394,24 @@ export class MysqlProvider implements FortuneProvider {
 		await this.execute(
 			`REPLACE INTO fortune_memories (${COLUMNS.join(", ")}) VALUES (${COLUMNS.map(() => "?").join(", ")})`,
 			this.memoryToParams(memory, vector),
+		);
+	}
+
+	async addMany(
+		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+	): Promise<void> {
+		if (!entries.length) return;
+		const single = `(${COLUMNS.map(() => "?").join(", ")})`;
+		const groups = new Array<string>(entries.length).fill(single);
+		const params: unknown[] = [];
+		for (const entry of entries) {
+			entry.memory.contentHash =
+				entry.memory.contentHash ?? memoryContentHash(entry.memory.content);
+			params.push(...this.memoryToParams(entry.memory, entry.vector));
+		}
+		await this.execute(
+			`REPLACE INTO fortune_memories (${COLUMNS.join(", ")}) VALUES ${groups.join(", ")}`,
+			params,
 		);
 	}
 

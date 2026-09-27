@@ -85,7 +85,10 @@ export async function runMigrate(): Promise<number> {
 	};
 
 	const now = new Date();
-	let migrated = 0;
+	const pending: Array<{
+		memory: Awaited<ReturnType<typeof normalizeMemory>>;
+		vector: number[] | null;
+	}> = [];
 	let failed = 0;
 	for (const row of rows) {
 		try {
@@ -106,22 +109,41 @@ export async function runMigrate(): Promise<number> {
 				occurredAt: row.occurred_at ? String(row.occurred_at) : null,
 				tags: safeTags(decode(row.tags ?? "[]", "tags")),
 			};
+			const createdRaw = row.created_at ? String(row.created_at) : null;
 			const memory = normalizeMemory(
 				draft as never,
-				new Date(String(row.created_at ?? now.toISOString())),
+				createdRaw && Number.isFinite(Date.parse(createdRaw))
+					? new Date(createdRaw)
+					: now,
 			);
 			// Préserve les dates originelles createdAt/updatedAt (portabilité).
-			memory.createdAt = String(row.created_at ?? memory.createdAt);
+			memory.createdAt = createdRaw ?? memory.createdAt;
 			memory.updatedAt = String(row.updated_at ?? memory.updatedAt);
 			memory.forgottenAt = (row.forgotten_at as string | null) ?? null;
 			const vector = parseVector(decode(row.vector ?? "", "vector"));
-			await provider.addMemory(memory, vector);
-			migrated += 1;
+			pending.push({ memory, vector });
 		} catch (error) {
 			failed += 1;
 			console.error(
 				`  ✗ id=${String(row.id).slice(0, 8)} : ${(error as Error).message}`,
 			);
+		}
+	}
+	// Écriture groupée : un seul flush/transaction côté provider.
+	let migrated = 0;
+	if (pending.length) {
+		try {
+			if (typeof provider.addMany === "function") {
+				await provider.addMany(pending);
+			} else {
+				for (const entry of pending) {
+					await provider.addMemory(entry.memory, entry.vector);
+				}
+			}
+			migrated = pending.length;
+		} catch (error) {
+			failed += pending.length;
+			console.error(`  ✗ écriture groupée : ${(error as Error).message}`);
 		}
 	}
 	await provider.close();
