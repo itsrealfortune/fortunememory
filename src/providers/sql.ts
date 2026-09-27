@@ -375,14 +375,23 @@ export class MysqlProvider implements FortuneProvider {
 		];
 	}
 
-	private query(sql: string, params?: unknown[]): Promise<unknown[]> {
+	private async query(sql: string, params?: unknown[]): Promise<unknown[]> {
 		if (!this.conn) throw new Error("MysqlProvider pas initialisé");
-		return this.conn.query(sql, params) as unknown as Promise<unknown[]>;
+		// mysql2/promise renvoie un tuple [rows, fields] : on déballe.
+		const result = (await this.conn.query(sql, params)) as unknown;
+		if (Array.isArray(result) && Array.isArray(result[0])) {
+			return result[0] as unknown[];
+		}
+		return result as unknown[];
 	}
 
-	private execute(sql: string, params?: unknown[]): Promise<unknown> {
+	private async execute(sql: string, params?: unknown[]): Promise<unknown> {
 		if (!this.conn) throw new Error("MysqlProvider pas initialisé");
-		return this.conn.execute(sql, params) as unknown as Promise<unknown>;
+		const result = (await this.conn.execute(sql, params)) as unknown;
+		if (Array.isArray(result) && !Array.isArray(result[0])) {
+			return result[0];
+		}
+		return result;
 	}
 
 	async addMemory(
