@@ -22,7 +22,10 @@ import type {
 export type SqliteRow = Record<string, unknown>;
 
 /** Valeurs liées nommées (sous-ensemble de SQLInputValue, sans binaires). */
-export type SqliteParams = Record<string, string | number | bigint | null>;
+export type SqliteParams = Record<
+	string,
+	string | number | bigint | Uint8Array | null
+>;
 
 export interface SqliteStatement {
 	run(params?: SqliteParams): { changes: number };
@@ -154,7 +157,8 @@ const SCHEMA = `
     updated_at TEXT NOT NULL,
     forgotten_at TEXT,
     content_hash TEXT,
-    vector TEXT
+    vector TEXT,
+    vector_blob BLOB
   );
   CREATE INDEX IF NOT EXISTS fortune_memories_scope
     ON fortune_memories(scope, status);
@@ -164,16 +168,18 @@ const SCHEMA = `
 
 const MIGRATE_CONTENT_HASH =
 	"ALTER TABLE fortune_memories ADD COLUMN content_hash TEXT";
+const MIGRATE_VECTOR_BLOB =
+	"ALTER TABLE fortune_memories ADD COLUMN vector_blob BLOB";
 
 const INSERT = `
   INSERT INTO fortune_memories (
     id, type, content, summary, source_kind, source_locator, source_title,
     scope, sensitivity, source_trust, confidence, valid_from, valid_to,
-    occurred_at, tags, status, created_at, updated_at, forgotten_at, content_hash, vector
+    occurred_at, tags, status, created_at, updated_at, forgotten_at, content_hash, vector, vector_blob
   ) VALUES (
     $id, $type, $content, $summary, $source_kind, $source_locator, $source_title,
     $scope, $sensitivity, $source_trust, $confidence, $valid_from, $valid_to,
-    $occurred_at, $tags, $status, $created_at, $updated_at, $forgotten_at, $content_hash, $vector
+    $occurred_at, $tags, $status, $created_at, $updated_at, $forgotten_at, $content_hash, $vector, $vector_blob
   )
   ON CONFLICT(id) DO UPDATE SET
     type=$type, content=$content, summary=$summary, source_kind=$source_kind,
@@ -181,7 +187,7 @@ const INSERT = `
     sensitivity=$sensitivity, source_trust=$source_trust, confidence=$confidence,
     valid_from=$valid_from, valid_to=$valid_to, occurred_at=$occurred_at,
     tags=$tags, status=$status, created_at=$created_at, updated_at=$updated_at,
-    forgotten_at=$forgotten_at, content_hash=$content_hash, vector=$vector;
+    forgotten_at=$forgotten_at, content_hash=$content_hash, vector=$vector, vector_blob=$vector_blob;
 `;
 
 export class SqliteProvider implements FortuneProvider {
@@ -223,6 +229,11 @@ export class SqliteProvider implements FortuneProvider {
 		} catch {
 			// Colonne déjà présente sur les bases existantes.
 		}
+		try {
+			this.db.exec(MIGRATE_VECTOR_BLOB);
+		} catch {
+			// Colonne déjà présente sur les bases existantes.
+		}
 		// Backfill : calcule content_hash une fois pour les lignes legacy,
 		// évite SHA-256 par ligne à chaque lecture.
 		const missing = this.db
@@ -238,6 +249,25 @@ export class SqliteProvider implements FortuneProvider {
 				backfill.run({
 					$id: String(row.id),
 					$hash: memoryContentHash(String(row.content ?? "")),
+				});
+			}
+		}
+		// Backfill blobs : une fois par DB legacy, lectures suivantes sans JSON.
+		const missingBlobs = this.db
+			.prepare(
+				"SELECT id, vector FROM fortune_memories WHERE vector_blob IS NULL AND vector IS NOT NULL",
+			)
+			.all() as Array<{ id: unknown; vector: unknown }>;
+		if (missingBlobs.length) {
+			const backfillBlob = this.db.prepare(
+				"UPDATE fortune_memories SET vector_blob = $blob WHERE id = $id",
+			);
+			for (const row of missingBlobs) {
+				const parsed = parseVector(row.vector);
+				if (!parsed) continue;
+				backfillBlob.run({
+					$id: String(row.id),
+					$blob: encodeVectorBlob(parsed),
 				});
 			}
 		}
@@ -275,7 +305,8 @@ export class SqliteProvider implements FortuneProvider {
 			$forgotten_at: memory.forgottenAt ?? null,
 			$content_hash:
 				memory.contentHash ?? memoryContentHash(memory.content),
-			$vector: vectorSubmitted ? JSON.stringify(vectorSubmitted) : null,
+			$vector: null,
+			$vector_blob: vectorSubmitted ? encodeVectorBlob(vectorSubmitted) : null,
 		};
 	}
 
@@ -323,7 +354,7 @@ export class SqliteProvider implements FortuneProvider {
 	): AsyncIterable<StoredRow> {
 		const columns = opts.withVectors === false
 			? "id, type, content, summary, source_kind, source_locator, source_title, scope, sensitivity, source_trust, confidence, valid_from, valid_to, occurred_at, tags, status, created_at, updated_at, forgotten_at, content_hash"
-			: "*, vector AS vector_raw";
+			: "*, vector AS vector_raw, vector_blob AS vector_blob_raw";
 		const conditions: string[] = [];
 		if (!includeForgotten) conditions.push("status = 'active'");
 		if (opts.scopePrefix) {
@@ -348,7 +379,9 @@ export class SqliteProvider implements FortuneProvider {
 				vector:
 					opts.withVectors === false
 						? null
-						: parseVector(row.vector_raw),
+						: parseVector(
+								row.vector_blob_raw ?? row.vector_raw,
+							),
 			};
 		}
 	}
@@ -368,6 +401,12 @@ export class SqliteProvider implements FortuneProvider {
 }
 
 function parseVector(raw: unknown): number[] | null {
+	if (
+		typeof Uint8Array !== "undefined" &&
+		(raw instanceof Uint8Array || (typeof Buffer !== "undefined" && Buffer.isBuffer(raw)))
+	) {
+		return decodeVectorBlob(raw as Uint8Array);
+	}
 	if (typeof raw !== "string") return null;
 	try {
 		const parsed = JSON.parse(raw);
@@ -375,6 +414,27 @@ function parseVector(raw: unknown): number[] | null {
 	} catch {
 		return null;
 	}
+}
+
+/** Encodage binaire Float32 natif : ~1 Ko/ligne, parse sans JSON. */
+function encodeVectorBlob(vector: number[]): Uint8Array {
+	const floats = new Float32Array(vector);
+	return new Uint8Array(
+		floats.buffer,
+		floats.byteOffset,
+		floats.byteLength,
+	);
+}
+
+function decodeVectorBlob(raw: Uint8Array): number[] | null {
+	if (raw.byteLength % 4 !== 0 || raw.byteLength === 0) return null;
+	// Legacy Float64 (8 octets/composante) ou courant Float32 (4 octets).
+	const bytesPerComponent = raw.byteLength % 8 === 0 ? 8 : 4;
+	const floats =
+		bytesPerComponent === 8
+			? new Float64Array(raw.buffer, raw.byteOffset, raw.byteLength / 8)
+			: new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
+	return Array.from(floats);
 }
 
 function rowToMemory(row: Record<string, unknown>): MemoryRecord {
