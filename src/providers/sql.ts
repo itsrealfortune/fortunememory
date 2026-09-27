@@ -7,6 +7,7 @@
  */
 
 import { memoryContentHash, type MemoryRecord } from "../schema.ts";
+import { encodeVectorBlob, parseVectorBlob } from "../vectors.ts";
 import type {
 	FortuneProvider,
 	IterateOptions,
@@ -34,6 +35,7 @@ const COLUMNS = [
 	"updated_at",
 	"forgotten_at",
 	"vector",
+	"vector_blob",
 ] as const;
 
 const UPSERT_SQL = `INSERT INTO fortune_memories (${COLUMNS.join(", ")}) VALUES (${COLUMNS.map((_, index) => `$${index + 1}`).join(", ")})
@@ -61,7 +63,8 @@ const CREATE_TABLE_POSTGRES = `
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     forgotten_at TEXT,
-    vector TEXT
+    vector TEXT,
+    vector_blob BYTEA
   );
   CREATE INDEX IF NOT EXISTS fortune_memories_scope_idx
     ON fortune_memories(scope, status);
@@ -116,6 +119,13 @@ export class PgliteProvider implements FortuneProvider {
 	async init(): Promise<void> {
 		this.client = await importPGlite(this.config.dataDir);
 		await this.client.exec(CREATE_TABLE_POSTGRES);
+		try {
+			await this.client.exec(
+				"ALTER TABLE fortune_memories ADD COLUMN vector_blob BYTEA",
+			);
+		} catch {
+			// Déjà présente.
+		}
 	}
 
 	async close(): Promise<void> {
@@ -147,7 +157,8 @@ export class PgliteProvider implements FortuneProvider {
 			memory.createdAt,
 			memory.updatedAt,
 			memory.forgottenAt ?? null,
-			vector ? JSON.stringify(vector) : null,
+			null, // colonne legacy : le vecteur vit dans vector_blob
+			vector ? encodeVectorBlob(vector) : null,
 		];
 	}
 
@@ -180,8 +191,10 @@ export class PgliteProvider implements FortuneProvider {
 	): Promise<MemoryRecord | null> {
 		const client = await this.require();
 		const result = await client.query(
-			"SELECT * FROM fortune_memories WHERE id=$1 AND (status='active' OR $2)",
-			[id, includeForgotten],
+			includeForgotten
+				? "SELECT * FROM fortune_memories WHERE id=$1"
+				: "SELECT * FROM fortune_memories WHERE id=$1 AND status='active'",
+			[id],
 		);
 		const row = result.rows?.[0];
 		return row ? rowToMemory(row as never) : null;
@@ -216,7 +229,7 @@ export class PgliteProvider implements FortuneProvider {
 				vector:
 					opts.withVectors === false
 						? null
-						: parseVector((row as never as { vector?: unknown }).vector),
+						: parseVector(row as never),
 			};
 		}
 	}
@@ -295,6 +308,13 @@ export class MysqlProvider implements FortuneProvider {
 			this.dsn,
 		)) as unknown as NonNullable<typeof this.conn>;
 		await this.conn.execute(CREATE_TABLE_MYSQL);
+		try {
+			await this.conn.execute(
+				"ALTER TABLE fortune_memories ADD COLUMN vector_blob LONGBLOB",
+			);
+		} catch {
+			// Déjà présente.
+		}
 	}
 
 	async close(): Promise<void> {
@@ -326,7 +346,8 @@ export class MysqlProvider implements FortuneProvider {
 			memory.createdAt,
 			memory.updatedAt,
 			memory.forgottenAt ?? null,
-			vector ? JSON.stringify(vector) : null,
+			null, // colonne legacy : le vecteur vit dans vector_blob
+			vector ? encodeVectorBlob(vector) : null,
 		];
 	}
 
@@ -370,8 +391,10 @@ export class MysqlProvider implements FortuneProvider {
 		includeForgotten = false,
 	): Promise<MemoryRecord | null> {
 		const rows = (await this.query(
-			"SELECT * FROM fortune_memories WHERE id=? AND (status='active' OR ?)",
-			[id, includeForgotten],
+			includeForgotten
+				? "SELECT * FROM fortune_memories WHERE id=?"
+				: "SELECT * FROM fortune_memories WHERE id=? AND status='active'",
+			[id],
 		)) as Array<Record<string, unknown>>;
 		return rows.length ? rowToMemory(rows[0]!) : null;
 	}
@@ -391,6 +414,13 @@ export class MysqlProvider implements FortuneProvider {
 			conditions.push("(scope=? OR scope LIKE ?)");
 			params.push(opts.scopePrefix, `${opts.scopePrefix}/%`);
 		}
+		if (opts.asOf) {
+			conditions.push(
+				"(valid_from IS NULL OR valid_from <= ?)",
+				"(valid_to IS NULL OR valid_to >= ?)",
+			);
+			params.push(opts.asOf, opts.asOf);
+		}
 		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 		const sql = `SELECT ${columns} FROM fortune_memories ${where} ORDER BY created_at DESC`;
 		const rows = (await this.query(
@@ -400,7 +430,7 @@ export class MysqlProvider implements FortuneProvider {
 		for (const row of rows) {
 			yield {
 				memory: rowToMemory(row),
-				vector: opts.withVectors === false ? null : parseVector(row.vector),
+				vector: opts.withVectors === false ? null : parseVector(row),
 			};
 		}
 	}
@@ -420,14 +450,8 @@ export class MysqlProvider implements FortuneProvider {
 	}
 }
 
-function parseVector(raw: unknown): number[] | null {
-	if (typeof raw !== "string") return null;
-	try {
-		const parsed = JSON.parse(raw);
-		return Array.isArray(parsed) ? parsed : null;
-	} catch {
-		return null;
-	}
+function parseVector(row: Record<string, unknown>): number[] | null {
+	return parseVectorBlob(row.vector_blob, row.vector);
 }
 
 function safeTags(raw: unknown): string[] {
