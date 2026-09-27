@@ -131,7 +131,7 @@ export class RoxifiedCSVProvider implements FortuneProvider {
 	}
 
 	async *iterate(includeForgotten = false): AsyncIterable<StoredRow> {
-		for (const row of [...this.rows]) {
+		for (const row of this.rows) {
 			if (!includeForgotten && row.memory.status !== "active") continue;
 			yield row;
 		}

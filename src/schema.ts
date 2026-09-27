@@ -107,7 +107,11 @@ function optionalDate(
 	if (value === undefined || value === null || value === "")
 		return value === "" ? undefined : (value ?? undefined);
 	const text = String(value);
-	if (!DATE_RE.test(text) || !Number.isFinite(Date.parse(text))) {
+	if (!DATE_RE.test(text)) {
+		throw new Error(`${field} doit être une date ISO avec offset`);
+	}
+	const time = Date.parse(text);
+	if (!Number.isFinite(time)) {
 		throw new Error(`${field} doit être une date ISO avec offset`);
 	}
 	return text;

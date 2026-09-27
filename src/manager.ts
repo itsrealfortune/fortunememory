@@ -193,9 +193,8 @@ export class FortuneMemoryManager {
 	): Promise<MemoryRecord[]> {
 		const limit = clamp(options.limit ?? 20, 1, 100);
 		const candidates = await this.filterRows(
-			this.iterActive(),
+			this.provider.iterate(false),
 			options,
-			undefined,
 		);
 		const decorated = candidates.map((row) => ({
 			row,
@@ -207,15 +206,6 @@ export class FortuneMemoryManager {
 		return decorated.slice(0, limit).map((entry) => entry.row.memory);
 	}
 
-	private async *iterActive(): AsyncGenerator<{
-		memory: MemoryRecord;
-		vector: number[] | null;
-	}> {
-		for await (const row of this.provider.iterate(false)) {
-			yield { memory: row.memory, vector: row.vector };
-		}
-	}
-
 	// ── Recherche ───────────────────────────────────────────────────────────
 
 	async search(
@@ -225,7 +215,7 @@ export class FortuneMemoryManager {
 		const limit = clamp(options.limit ?? 10, 1, 50);
 		const retrieval = (options.retrieval ?? "hybrid") as RetrievalMode;
 
-		const rows = await this.filterRows(this.iterActive(), options, query);
+		const rows = await this.filterRows(this.provider.iterate(false), options);
 		if (!rows.length) return [];
 		const queryTokens = tokenize(query);
 		if (!queryTokens.length) {
@@ -245,7 +235,6 @@ export class FortuneMemoryManager {
 				options,
 				await this.vectorProvider.encode(query),
 				candidateLimit,
-				options.excludeContent,
 			);
 		}
 
@@ -272,15 +261,11 @@ export class FortuneMemoryManager {
 		const queryTokens = tokenize(input.content);
 		if (!queryTokens.length) return [];
 
-		const rows = await this.filterRows(
-			this.iterActive(),
-			{
-				scope: input.scope,
-				type: String(input.type) as MemoryType,
-				maxSensitivity: "restricted",
-			},
-			undefined,
-		);
+		const rows = await this.filterRows(this.provider.iterate(false), {
+			scope: input.scope,
+			type: String(input.type) as MemoryType,
+			maxSensitivity: "restricted",
+		});
 		const queryVector = await this.vectorProvider.encode(input.content);
 
 		return this.rankConflicts(rows, queryVector, threshold, limit, input);
@@ -360,7 +345,6 @@ export class FortuneMemoryManager {
 	private async filterRows(
 		iter: AsyncIterable<{ memory: MemoryRecord; vector: number[] | null }>,
 		options: SearchOptions & { asOf?: string },
-		_query: string | undefined,
 	): Promise<Array<{ memory: MemoryRecord; vector: number[] | null }>> {
 		const asOf = options.asOf ?? new Date().toISOString();
 		const asOfTime = Date.parse(asOf);
@@ -429,13 +413,11 @@ export class FortuneMemoryManager {
 		options: SearchOptions,
 		queryVector: number[],
 		limit: number,
-		excludedContent?: string,
 	): Promise<SearchHit[]> {
 		const minimum = options.minVectorScore ?? 0.08;
 		const candidates: SearchHit[] = [];
 		for (const row of rows) {
 			if (!row.vector) continue;
-			if (excludedContent && row.memory.content === excludedContent) continue;
 			const vectorScore = this.similarity(queryVector, row.vector);
 			if (vectorScore < minimum) continue;
 			candidates.push({ memory: row.memory, vectorScore });

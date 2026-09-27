@@ -163,9 +163,7 @@ function hashFeature(value: string): number {
 	return hash >>> 0;
 }
 
-interface OllamaLikeProvider extends VectorProvider {}
-
-class OllamaEmbeddings implements OllamaLikeProvider {
+class OllamaEmbeddings implements VectorProvider {
 	readonly name = "ollama";
 	readonly model: string;
 	private readonly baseUrl: string;
@@ -190,7 +188,7 @@ class OllamaEmbeddings implements OllamaLikeProvider {
 	}
 }
 
-class OpenAICompatibleEmbeddings implements OllamaLikeProvider {
+class OpenAICompatibleEmbeddings implements VectorProvider {
 	readonly name = "openai-compatible";
 	readonly model: string;
 	private readonly baseUrl: string;

@@ -32,6 +32,10 @@ const COLUMNS = [
 	"vector",
 ] as const;
 
+const UPSERT_SQL = `INSERT INTO fortune_memories (${COLUMNS.join(", ")}) VALUES (${COLUMNS.map((_, index) => `$${index + 1}`).join(", ")})
+       ON CONFLICT (id) DO UPDATE SET ${COLUMNS.slice(1)
+					.map((column, index) => `${column} = $${index + 2}`)
+					.join(", ")}`;
 const CREATE_TABLE_POSTGRES = `
   CREATE TABLE IF NOT EXISTS fortune_memories (
     id TEXT PRIMARY KEY,
@@ -118,9 +122,7 @@ export class PgliteProvider implements FortuneProvider {
 	private memoryToParams(
 		memory: MemoryRecord,
 		vector: number[] | null,
-		dollar = true,
 	): unknown[] {
-		void dollar;
 		return [
 			memory.id,
 			memory.type,
@@ -151,15 +153,8 @@ export class PgliteProvider implements FortuneProvider {
 	): Promise<void> {
 		memory.contentHash =
 			memory.contentHash ?? memoryContentHash(memory.content);
-		const placeholder = (index: number): string => `$${index}`;
 		const client = await this.require();
-		await client.query(
-			`INSERT INTO fortune_memories (${COLUMNS.join(", ")}) VALUES (${COLUMNS.map((_, index) => placeholder(index + 1)).join(", ")})
-       ON CONFLICT (id) DO UPDATE SET ${COLUMNS.slice(1)
-					.map((column, index) => `${column} = ${placeholder(index + 2)}`)
-					.join(", ")}`,
-			this.memoryToParams(memory, vector),
-		);
+		await client.query(UPSERT_SQL, this.memoryToParams(memory, vector));
 	}
 
 	async updateStatus(
@@ -395,6 +390,17 @@ function parseVector(raw: unknown): number[] | null {
 	}
 }
 
+function safeTags(raw: unknown): string[] {
+	if (Array.isArray(raw)) return raw.map(String);
+	if (typeof raw !== "string") return [];
+	try {
+		const parsed = JSON.parse(raw);
+		return Array.isArray(parsed) ? parsed.map(String) : [];
+	} catch {
+		return [];
+	}
+}
+
 function rowToMemory(row: Record<string, unknown>): MemoryRecord {
 	const content = String(row.content ?? "");
 	return {
@@ -419,11 +425,7 @@ function rowToMemory(row: Record<string, unknown>): MemoryRecord {
 		validFrom: (row.valid_from as string | null) ?? null,
 		validTo: (row.valid_to as string | null) ?? null,
 		occurredAt: (row.occurred_at as string | null) ?? null,
-		tags: Array.isArray(row.tags)
-			? row.tags.map(String)
-			: typeof row.tags === "string"
-				? (JSON.parse(row.tags) as string[])
-				: [],
+		tags: safeTags(row.tags),
 		status: String(row.status) === "forgotten" ? "forgotten" : "active",
 		createdAt: String(row.created_at),
 		updatedAt: String(row.updated_at),
