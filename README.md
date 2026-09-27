@@ -126,6 +126,44 @@ Release: `npm run publish-package` (tag `v*` → npm publish via GitHub Actions)
 
 ## Changelog
 
+### v1.0.3 — second optimization round + provider bugfixes
+
+No result changes, 75/75 tests green. All providers (sqlite, json, csv, pglite, mysql) now executed live and green.
+
+<details>
+<summary>Benchmarks: master (v1.0.2) vs round2 (click to expand)</summary>
+
+Standard bench (N=500, sqlite) — no regression, paths unchanged without validity windows or bulk writes:
+
+| Op | v1.0.2 | v1.0.3 | Factor |
+|---|---|---|---|
+| `remember` | 0.70 ms | 0.52 ms | ~1.3× (noise) |
+| `search hybrid` | 12.37 ms | 12.02 ms | 1.03× |
+| `search lexical` | 3.60 ms | 3.63 ms | 0.99× |
+| `search vector` | 11.19 ms | 11.12 ms | 1.01× |
+| `list` | 3.53 ms | 3.46 ms | 1.02× |
+| `findConflicts` | 1.27 ms | 1.35 ms | 0.94× |
+| `getContext` | 11.76 ms | 11.82 ms | 0.99× |
+
+Targeted benches (paths this round actually touches):
+
+| Path | before | after | Factor |
+|---|---|---|---|
+| json bulk insert 300 rows (`addMany`) | 0.226 ms/op | 0.005 ms/op | **~45×** |
+| `search` with 50% expired validity windows | 13.53 ms/op | 12.15 ms/op | **1.1×** |
+
+**Optimizations**
+- Temporal pushdown: `validFrom`/`validTo`/`occurredAt` normalized to UTC ISO at write; new `IterateOptions.asOf` pushed to SQL in sqlite/pglite/mysql, pre-filtered in file providers; shared `inWindow()` with string fast-path (removes 2 `Date.parse` per row per scan).
+- Static `getMemory` in all SQL providers (index-friendly, no `OR`-parameterized query).
+- `vector_blob` (versioned Float32) extended to pglite/mysql; blob helpers shared in `vectors.ts`.
+- `Map<id,index>` in rox providers; new optional `FortuneProvider.addMany()` (single transaction/flush/append, multi-row INSERT/REPLACE); `migrate.ts` writes once instead of O(N²) I/O; `npm run bench` script.
+
+**Bugfixes**
+- **mysql: all reads were broken** — `mysql2/promise` returns `[rows, fields]` tuples that were never unwrapped (`getMemory`, `search`, `list`, `count`, `updateStatus` all returned garbage while writes passed silently). Now unwrapped in `query()`/`execute()`. Verified live against MySQL 8.4 (12/12 checks).
+- pglite verified live (15/15 checks: roundtrip, blob precision, pushdown, legacy `ALTER` migration).
+
+</details>
+
 ### v1.0.2 — CPU optimization pass
 
 Hot-path optimization of `search` / `remember` (no algorithm changes: exact full-scan scoring preserved, all 75 tests green).
