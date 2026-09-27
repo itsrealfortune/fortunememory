@@ -33,13 +33,18 @@ const CONCEPT_ALIASES = new Map([
 	["due", "deadline"],
 ]);
 
+const DIACRITICS_RE = /[̀-ͯ]/g;
+const TOKEN_RE = /[\p{L}\p{N}]+/gu;
+
 export function tokenize(text: unknown): string[] {
+	const raw = String(text ?? "");
+	if (!raw) return [];
 	return (
-		String(text ?? "")
+		raw
 			.normalize("NFKD")
-			.replace(/[\u0300-\u036f]/g, "")
+			.replace(DIACRITICS_RE, "")
 			.toLowerCase()
-			.match(/[\p{L}\p{N}]+/gu) || []
+			.match(TOKEN_RE) || []
 	).slice(0, 500);
 }
 
@@ -69,13 +74,14 @@ export class FeatureHashEncoder implements VectorProvider {
 		const tokens = tokenize(text);
 		const vector = new Array<number>(this.dimensions).fill(0);
 
-		for (let index = 1; index < tokens.length; index++) {
+		for (let index = 0; index < tokens.length; index++) {
 			const token = tokens[index]!;
-			const previous = tokens[index - 1]!;
 			addFeature(vector, `word:${token}`, 1);
 			const concept = CONCEPT_ALIASES.get(token);
 			if (concept) addFeature(vector, `concept:${concept}`, 1.4);
-			addFeature(vector, `bigram:${previous}_${token}`, 0.7);
+			if (index > 0) {
+				addFeature(vector, `bigram:${tokens[index - 1]}_${token}`, 0.7);
+			}
 			if (token.length >= 4) {
 				const padded = `^${token}$`;
 				for (let offset = 0; offset <= padded.length - 3; offset++) {
@@ -84,11 +90,31 @@ export class FeatureHashEncoder implements VectorProvider {
 			}
 		}
 
-		const norm = Math.sqrt(
-			vector.reduce((sum, value) => sum + value * value, 0),
-		);
-		return norm ? vector.map((value) => value / norm) : vector;
+		let sum = 0;
+		for (let index = 0; index < vector.length; index++) {
+			const value = vector[index] ?? 0;
+			sum += value * value;
+		}
+		const norm = Math.sqrt(sum);
+		if (norm) {
+			for (let index = 0; index < vector.length; index++) {
+				vector[index] = (vector[index] ?? 0) / norm;
+			}
+		}
+		return vector;
 	}
+}
+
+/**
+ * Produit scalaire : exact pour les vecteurs L2-normés (FeatureHashEncoder),
+ * évite 2 normes + 2 sqrt par comparaison dans le chemin search.
+ */
+export function dotProduct(left: number[], right: number[]): number {
+	let dot = 0;
+	for (let index = 0; index < left.length; index++) {
+		dot += (left[index] ?? 0) * (right[index] ?? 0);
+	}
+	return dot;
 }
 
 export function cosineSimilarity(left: number[], right: number[]): number {
@@ -113,8 +139,16 @@ export function cosineSimilarity(left: number[], right: number[]): number {
 	return denominator ? dot / denominator : 0;
 }
 
+const FEATURE_CACHE = new Map<string, number>();
+const FEATURE_CACHE_LIMIT = 20_000;
+
 function addFeature(vector: number[], feature: string, weight: number): void {
-	const hash = hashFeature(feature);
+	let hash = FEATURE_CACHE.get(feature);
+	if (hash === undefined) {
+		hash = hashFeature(feature);
+		if (FEATURE_CACHE.size >= FEATURE_CACHE_LIMIT) FEATURE_CACHE.clear();
+		FEATURE_CACHE.set(feature, hash);
+	}
 	const index = (hash >>> 1) % vector.length;
 	const current = vector[index] ?? 0;
 	vector[index] = current + (hash & 1 ? weight : -weight);

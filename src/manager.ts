@@ -26,6 +26,7 @@ import {
 import {
 	FeatureHashEncoder,
 	cosineSimilarity,
+	dotProduct,
 	tokenize,
 	type VectorProvider,
 } from "./vectors.ts";
@@ -51,15 +52,18 @@ export interface ContextOptions extends SearchOptions {
 	maxChars?: number;
 }
 
-const TRUST_RANK = (value: string): number => {
-	const rank = (SOURCE_TRUST_LEVELS as readonly string[]).indexOf(value);
-	return rank < 0
-		? (SOURCE_TRUST_LEVELS as readonly string[]).indexOf("owner")
-		: rank;
-};
+const TRUST_RANK_MAP = new Map<string, number>(
+	SOURCE_TRUST_LEVELS.map((value, index) => [value, index]),
+);
+const SENSITIVITY_RANK_MAP = new Map<string, number>(
+	SENSITIVITY_LEVELS.map((value, index) => [value, index]),
+);
+
+const TRUST_RANK = (value: string): number =>
+	TRUST_RANK_MAP.get(value) ?? TRUST_RANK_MAP.get("owner")!;
 
 const SENSITIVITY_RANK = (value: string): number =>
-	(SENSITIVITY_LEVELS as readonly string[]).indexOf(value);
+	SENSITIVITY_RANK_MAP.get(value) ?? -1;
 
 const clamp = (value: number, min: number, max: number): number =>
 	Math.min(max, Math.max(min, Number(value)));
@@ -72,10 +76,29 @@ export interface ConflictCandidate {
 export class FortuneMemoryManager {
 	readonly provider: FortuneProvider;
 	readonly vectorProvider: VectorProvider;
+	/** Cache tokens lexicaux par id : évite re-tokenize à chaque search. */
+	private readonly lexicalCache = new Map<string, Set<string>>();
+	private static readonly LEXICAL_CACHE_LIMIT = 10_000;
 
 	constructor(provider: FortuneProvider, vectors?: VectorProvider) {
 		this.provider = provider;
 		this.vectorProvider = vectors ?? new FeatureHashEncoder();
+	}
+
+	private lexicalTokens(memory: MemoryRecord): Set<string> {
+		let cached = this.lexicalCache.get(memory.id);
+		if (!cached) {
+			cached = new Set(
+				contentTokens(
+					`${memory.content} ${memory.summary} ${memory.tags.join(" ")}`,
+				),
+			);
+			if (this.lexicalCache.size >= FortuneMemoryManager.LEXICAL_CACHE_LIMIT) {
+				this.lexicalCache.clear();
+			}
+			this.lexicalCache.set(memory.id, cached);
+		}
+		return cached;
 	}
 
 	// ── Écriture ────────────────────────────────────────────────────────────
@@ -91,6 +114,7 @@ export class FortuneMemoryManager {
 		);
 		if (duplicate) return duplicate;
 		await this.provider.addMemory(memory, await this.encodeMemory(memory));
+		this.lexicalCache.delete(memory.id);
 		return memory;
 	}
 
@@ -109,6 +133,13 @@ export class FortuneMemoryManager {
 		return null;
 	}
 
+	private similarity(left: number[], right: number[]): number {
+		// Vecteurs FeatureHashEncoder déjà L2-normés → simple dot, sans sqrt.
+		if (this.vectorProvider instanceof FeatureHashEncoder) {
+			return dotProduct(left, right);
+		}
+		return cosineSimilarity(left, right);
+	}
 	private async encodeMemory(memory: MemoryRecord): Promise<number[] | null> {
 		try {
 			const text = `${memory.content}\n${memory.summary}\n${memory.tags.join(" ")}`;
@@ -133,7 +164,9 @@ export class FortuneMemoryManager {
 	 */
 	async forget(id: string): Promise<boolean> {
 		const now = new Date().toISOString();
-		return this.provider.updateStatus(id, "forgotten", now);
+		const forgotten = await this.provider.updateStatus(id, "forgotten", now);
+		if (forgotten) this.lexicalCache.delete(id);
+		return forgotten;
 	}
 
 	async stats(): Promise<{
@@ -164,14 +197,14 @@ export class FortuneMemoryManager {
 			options,
 			undefined,
 		);
-		candidates.sort((left, right) =>
-			compareDate(
-				right,
-				left,
-				(m) => m.occurredAt || m.validFrom || m.createdAt,
+		const decorated = candidates.map((row) => ({
+			row,
+			ts: parseDate(
+				row.memory.occurredAt || row.memory.validFrom || row.memory.createdAt,
 			),
-		);
-		return candidates.slice(0, limit).map((row) => row.memory);
+		}));
+		decorated.sort((left, right) => right.ts - left.ts);
+		return decorated.slice(0, limit).map((entry) => entry.row.memory);
 	}
 
 	private async *iterActive(): AsyncGenerator<{
@@ -193,6 +226,7 @@ export class FortuneMemoryManager {
 		const retrieval = (options.retrieval ?? "hybrid") as RetrievalMode;
 
 		const rows = await this.filterRows(this.iterActive(), options, query);
+		if (!rows.length) return [];
 		const queryTokens = tokenize(query);
 		if (!queryTokens.length) {
 			return rows.slice(0, limit).map((row) => row.memory);
@@ -263,7 +297,7 @@ export class FortuneMemoryManager {
 		for (const row of rows) {
 			if (!row.vector) continue;
 			if (row.memory.content === input.content) continue;
-			const vectorScore = cosineSimilarity(queryVector, row.vector);
+			const vectorScore = this.similarity(queryVector, row.vector);
 			if (vectorScore >= threshold) {
 				candidates.push({ memory: row.memory, vectorScore });
 			}
@@ -364,8 +398,7 @@ export class FortuneMemoryManager {
 		);
 		const scored: Array<{ hit: SearchHit; lexicalScore: number }> = [];
 		for (const row of rows) {
-			const docs = `${row.memory.content} ${row.memory.summary} ${row.memory.tags.join(" ")}`;
-			const tokens = new Set(contentTokens(docs));
+			const tokens = this.lexicalTokens(row.memory);
 			if (!tokens.size) continue;
 			let overlap = 0;
 			for (const token of meaningful) {
@@ -403,7 +436,7 @@ export class FortuneMemoryManager {
 		for (const row of rows) {
 			if (!row.vector) continue;
 			if (excludedContent && row.memory.content === excludedContent) continue;
-			const vectorScore = cosineSimilarity(queryVector, row.vector);
+			const vectorScore = this.similarity(queryVector, row.vector);
 			if (vectorScore < minimum) continue;
 			candidates.push({ memory: row.memory, vectorScore });
 		}
@@ -576,14 +609,10 @@ function scopeMatches(scope: string, filter: string): boolean {
 	return scope === filter || scope.startsWith(`${filter}/`);
 }
 
-function compareDate(
-	left: { memory: MemoryRecord },
-	right: { memory: MemoryRecord },
-	pick: (memory: MemoryRecord) => string | null | undefined,
-): number {
-	const l = pick(left.memory) ?? left.memory.createdAt;
-	const r = pick(right.memory) ?? right.memory.createdAt;
-	return Date.parse(r) - Date.parse(l);
+function parseDate(value: string | null | undefined): number {
+	if (!value) return Number.NaN;
+	const time = Date.parse(value);
+	return time;
 }
 
 function clip(text: string, max: number): string {

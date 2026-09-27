@@ -149,21 +149,27 @@ const SCHEMA = `
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     forgotten_at TEXT,
+    content_hash TEXT,
     vector TEXT
   );
   CREATE INDEX IF NOT EXISTS fortune_memories_scope
     ON fortune_memories(scope, status);
+  CREATE INDEX IF NOT EXISTS fortune_memories_content_hash
+    ON fortune_memories(content_hash, scope);
 `;
+
+const MIGRATE_CONTENT_HASH =
+	"ALTER TABLE fortune_memories ADD COLUMN content_hash TEXT";
 
 const INSERT = `
   INSERT INTO fortune_memories (
     id, type, content, summary, source_kind, source_locator, source_title,
     scope, sensitivity, source_trust, confidence, valid_from, valid_to,
-    occurred_at, tags, status, created_at, updated_at, forgotten_at, vector
+    occurred_at, tags, status, created_at, updated_at, forgotten_at, content_hash, vector
   ) VALUES (
     $id, $type, $content, $summary, $source_kind, $source_locator, $source_title,
     $scope, $sensitivity, $source_trust, $confidence, $valid_from, $valid_to,
-    $occurred_at, $tags, $status, $created_at, $updated_at, $forgotten_at, $vector
+    $occurred_at, $tags, $status, $created_at, $updated_at, $forgotten_at, $content_hash, $vector
   )
   ON CONFLICT(id) DO UPDATE SET
     type=$type, content=$content, summary=$summary, source_kind=$source_kind,
@@ -171,7 +177,7 @@ const INSERT = `
     sensitivity=$sensitivity, source_trust=$source_trust, confidence=$confidence,
     valid_from=$valid_from, valid_to=$valid_to, occurred_at=$occurred_at,
     tags=$tags, status=$status, created_at=$created_at, updated_at=$updated_at,
-    forgotten_at=$forgotten_at, vector=$vector;
+    forgotten_at=$forgotten_at, content_hash=$content_hash, vector=$vector;
 `;
 
 export class SqliteProvider implements FortuneProvider {
@@ -198,6 +204,29 @@ export class SqliteProvider implements FortuneProvider {
 		this.db.exec("PRAGMA foreign_keys = ON;");
 		this.db.exec("PRAGMA busy_timeout = 5000;");
 		this.db.exec(SCHEMA);
+		try {
+			this.db.exec(MIGRATE_CONTENT_HASH);
+		} catch {
+			// Colonne déjà présente sur les bases existantes.
+		}
+		// Backfill : calcule content_hash une fois pour les lignes legacy,
+		// évite SHA-256 par ligne à chaque lecture.
+		const missing = this.db
+			.prepare(
+				"SELECT id, content FROM fortune_memories WHERE content_hash IS NULL",
+			)
+			.all() as Array<{ id: unknown; content: unknown }>;
+		if (missing.length) {
+			const backfill = this.db.prepare(
+				"UPDATE fortune_memories SET content_hash = $hash WHERE id = $id",
+			);
+			for (const row of missing) {
+				backfill.run({
+					$id: String(row.id),
+					$hash: memoryContentHash(String(row.content ?? "")),
+				});
+			}
+		}
 	}
 
 	async close(): Promise<void> {
@@ -229,6 +258,8 @@ export class SqliteProvider implements FortuneProvider {
 			$created_at: memory.createdAt,
 			$updated_at: memory.updatedAt,
 			$forgotten_at: memory.forgottenAt ?? null,
+			$content_hash:
+				memory.contentHash ?? memoryContentHash(memory.content),
 			$vector: vectorSubmitted ? JSON.stringify(vectorSubmitted) : null,
 		};
 	}
@@ -317,7 +348,10 @@ function rowToMemory(row: Record<string, unknown>): MemoryRecord {
 		id: String(row.id),
 		type: String(row.type) as MemoryRecord["type"],
 		content,
-		contentHash: memoryContentHash(content),
+		contentHash:
+			typeof row.content_hash === "string" && row.content_hash
+				? row.content_hash
+				: memoryContentHash(content),
 		summary: String(row.summary ?? ""),
 		source: {
 			kind: String(row.source_kind ?? "manual"),
