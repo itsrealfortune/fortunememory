@@ -26,7 +26,11 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { memoryContentHash, type MemoryRecord } from "../schema.ts";
-import type { FortuneProvider, IterateOptions, StoredRow } from "./interface.ts";
+import type {
+	FortuneProvider,
+	IterateOptions,
+	StoredRow,
+} from "./interface.ts";
 
 interface PersistedPayload {
 	version: 1;

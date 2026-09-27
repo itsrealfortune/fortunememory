@@ -303,8 +303,7 @@ export class SqliteProvider implements FortuneProvider {
 			$created_at: memory.createdAt,
 			$updated_at: memory.updatedAt,
 			$forgotten_at: memory.forgottenAt ?? null,
-			$content_hash:
-				memory.contentHash ?? memoryContentHash(memory.content),
+			$content_hash: memory.contentHash ?? memoryContentHash(memory.content),
 			$vector: null,
 			$vector_blob: vectorSubmitted ? encodeVectorBlob(vectorSubmitted) : null,
 		};
@@ -327,11 +326,11 @@ export class SqliteProvider implements FortuneProvider {
 		const result = this.statement(
 			"UPDATE fortune_memories SET status = $status, forgotten_at = $forgotten_at, updated_at = $at WHERE id = $id",
 		).run({
-				$id: id,
-				$status: status,
-				$at: at,
-				$forgotten_at: status === "forgotten" ? at : null,
-			});
+			$id: id,
+			$status: status,
+			$at: at,
+			$forgotten_at: status === "forgotten" ? at : null,
+		});
 		return result.changes > 0;
 	}
 
@@ -342,9 +341,9 @@ export class SqliteProvider implements FortuneProvider {
 		const row = this.statement(
 			"SELECT *, vector AS vector_raw FROM fortune_memories WHERE id = $id AND (status = 'active' OR $includeForgotten)",
 		).get({
-				$id: id,
-				$includeForgotten: includeForgotten ? 1 : 0,
-			});
+			$id: id,
+			$includeForgotten: includeForgotten ? 1 : 0,
+		});
 		return row ? rowToMemory(row) : null;
 	}
 
@@ -352,9 +351,10 @@ export class SqliteProvider implements FortuneProvider {
 		includeForgotten = false,
 		opts: IterateOptions = {},
 	): AsyncIterable<StoredRow> {
-		const columns = opts.withVectors === false
-			? "id, type, content, summary, source_kind, source_locator, source_title, scope, sensitivity, source_trust, confidence, valid_from, valid_to, occurred_at, tags, status, created_at, updated_at, forgotten_at, content_hash"
-			: "*, vector AS vector_raw, vector_blob AS vector_blob_raw";
+		const columns =
+			opts.withVectors === false
+				? "id, type, content, summary, source_kind, source_locator, source_title, scope, sensitivity, source_trust, confidence, valid_from, valid_to, occurred_at, tags, status, created_at, updated_at, forgotten_at, content_hash"
+				: "*, vector AS vector_raw, vector_blob AS vector_blob_raw";
 		const conditions: string[] = [];
 		if (!includeForgotten) conditions.push("status = 'active'");
 		if (opts.scopePrefix) {
@@ -363,8 +363,7 @@ export class SqliteProvider implements FortuneProvider {
 			);
 		}
 		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-		const sql =
-			`SELECT ${columns} FROM fortune_memories ${where} ORDER BY created_at DESC`;
+		const sql = `SELECT ${columns} FROM fortune_memories ${where} ORDER BY created_at DESC`;
 		const escapeLike = (value: string): string =>
 			value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 		const params: SqliteParams | undefined = opts.scopePrefix
@@ -379,9 +378,7 @@ export class SqliteProvider implements FortuneProvider {
 				vector:
 					opts.withVectors === false
 						? null
-						: parseVector(
-								row.vector_blob_raw ?? row.vector_raw,
-							),
+						: parseVector(row.vector_blob_raw ?? row.vector_raw),
 			};
 		}
 	}
@@ -403,7 +400,8 @@ export class SqliteProvider implements FortuneProvider {
 function parseVector(raw: unknown): number[] | null {
 	if (
 		typeof Uint8Array !== "undefined" &&
-		(raw instanceof Uint8Array || (typeof Buffer !== "undefined" && Buffer.isBuffer(raw)))
+		(raw instanceof Uint8Array ||
+			(typeof Buffer !== "undefined" && Buffer.isBuffer(raw)))
 	) {
 		return decodeVectorBlob(raw as Uint8Array);
 	}

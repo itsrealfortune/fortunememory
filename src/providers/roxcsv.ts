@@ -31,7 +31,11 @@ import {
 	parseVector,
 } from "./csv.ts";
 import { memoryContentHash, type MemoryRecord } from "../schema.ts";
-import type { FortuneProvider, IterateOptions, StoredRow } from "./interface.ts";
+import type {
+	FortuneProvider,
+	IterateOptions,
+	StoredRow,
+} from "./interface.ts";
 
 export class RoxifiedCSVProvider implements FortuneProvider {
 	readonly name = "roxcsv";

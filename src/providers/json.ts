@@ -9,7 +9,11 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { memoryContentHash, type MemoryRecord } from "../schema.ts";
-import type { FortuneProvider, IterateOptions, StoredRow } from "./interface.ts";
+import type {
+	FortuneProvider,
+	IterateOptions,
+	StoredRow,
+} from "./interface.ts";
 
 interface PersistedPayload {
 	version: 1;
@@ -105,10 +109,7 @@ export class JsonProvider implements FortuneProvider {
 	): Promise<MemoryRecord | null> {
 		const slot = this.index.get(id);
 		const row = slot !== undefined ? this.rows[slot] : undefined;
-		if (
-			row &&
-			(includeForgotten || row.memory.status === "active")
-		) {
+		if (row && (includeForgotten || row.memory.status === "active")) {
 			return row.memory;
 		}
 		return null;

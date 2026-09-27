@@ -200,7 +200,9 @@ export class PgliteProvider implements FortuneProvider {
 		const params: unknown[] = [];
 		if (!includeForgotten) conditions.push("status='active'");
 		if (opts.scopePrefix) {
-			conditions.push(`(scope=$${params.length + 1} OR scope LIKE $${params.length + 2})`);
+			conditions.push(
+				`(scope=$${params.length + 1} OR scope LIKE $${params.length + 2})`,
+			);
 			params.push(opts.scopePrefix, `${opts.scopePrefix}/%`);
 		}
 		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -390,8 +392,7 @@ export class MysqlProvider implements FortuneProvider {
 			params.push(opts.scopePrefix, `${opts.scopePrefix}/%`);
 		}
 		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-		const sql =
-			`SELECT ${columns} FROM fortune_memories ${where} ORDER BY created_at DESC`;
+		const sql = `SELECT ${columns} FROM fortune_memories ${where} ORDER BY created_at DESC`;
 		const rows = (await this.query(
 			sql,
 			params.length ? params : undefined,
@@ -399,8 +400,7 @@ export class MysqlProvider implements FortuneProvider {
 		for (const row of rows) {
 			yield {
 				memory: rowToMemory(row),
-				vector:
-					opts.withVectors === false ? null : parseVector(row.vector),
+				vector: opts.withVectors === false ? null : parseVector(row.vector),
 			};
 		}
 	}

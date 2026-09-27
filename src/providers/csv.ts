@@ -13,7 +13,11 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { memoryContentHash, type MemoryRecord } from "../schema.ts";
-import type { FortuneProvider, IterateOptions, StoredRow } from "./interface.ts";
+import type {
+	FortuneProvider,
+	IterateOptions,
+	StoredRow,
+} from "./interface.ts";
 
 export const HEADER = [
 	"id",
@@ -160,7 +164,10 @@ export class CsvProvider implements FortuneProvider {
 						memory: rowToMemory(record),
 						vector: parseVector(record.vector ?? null),
 					});
-					this.index.set(this.rows[this.rows.length - 1]!.memory.id, this.rows.length - 1);
+					this.index.set(
+						this.rows[this.rows.length - 1]!.memory.id,
+						this.rows.length - 1,
+					);
 				} catch {
 					// ligne corrompue : on la saute, on ne crash pas tout le vault
 				}
