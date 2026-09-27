@@ -20,6 +20,7 @@ export class JsonProvider implements FortuneProvider {
 	readonly name = "json";
 	private readonly filePath: string;
 	private rows: StoredRow[] = [];
+	private readonly index = new Map<string, number>();
 	private dirty = false;
 
 	constructor(filePath: string) {
@@ -33,6 +34,13 @@ export class JsonProvider implements FortuneProvider {
 					readFileSync(this.filePath, "utf8"),
 				) as PersistedPayload;
 				this.rows = Array.isArray(payload?.memories) ? payload.memories : [];
+				for (let i = 0; i < this.rows.length; i++) {
+					const row = this.rows[i]!;
+					this.index.set(row.memory.id, i);
+					if (!row.memory.contentHash) {
+						row.memory.contentHash = memoryContentHash(row.memory.content);
+					}
+				}
 				return;
 			} catch (error) {
 				throw new Error(
@@ -57,10 +65,13 @@ export class JsonProvider implements FortuneProvider {
 	}
 
 	private setRow(record: MemoryRecord, vector: number[] | null): void {
-		const index = this.rows.findIndex((row) => row.memory.id === record.id);
+		const known = this.index.get(record.id);
 		const stored: StoredRow = { memory: record, vector };
-		if (index >= 0) this.rows[index] = stored;
-		else this.rows.push(stored);
+		if (known !== undefined) this.rows[known] = stored;
+		else {
+			this.index.set(record.id, this.rows.length);
+			this.rows.push(stored);
+		}
 		this.dirty = true;
 		this.flush();
 	}
@@ -77,7 +88,8 @@ export class JsonProvider implements FortuneProvider {
 		status: "active" | "forgotten",
 		at: string,
 	): Promise<boolean> {
-		const row = this.rows.find((candidate) => candidate.memory.id === id);
+		const slot = this.index.get(id);
+		const row = slot !== undefined ? this.rows[slot] : undefined;
 		if (!row) return false;
 		row.memory.status = status;
 		row.memory.forgottenAt = status === "forgotten" ? at : null;
@@ -91,19 +103,19 @@ export class JsonProvider implements FortuneProvider {
 		id: string,
 		includeForgotten = false,
 	): Promise<MemoryRecord | null> {
-		const row = this.rows.find(
-			(candidate) =>
-				candidate.memory.id === id &&
-				(includeForgotten || candidate.memory.status === "active"),
-		);
-		if (row && !row.memory.contentHash) {
-			row.memory.contentHash = memoryContentHash(row.memory.content);
+		const slot = this.index.get(id);
+		const row = slot !== undefined ? this.rows[slot] : undefined;
+		if (
+			row &&
+			(includeForgotten || row.memory.status === "active")
+		) {
+			return row.memory;
 		}
-		return row?.memory ?? null;
+		return null;
 	}
 
 	async *iterate(includeForgotten = false): AsyncIterable<StoredRow> {
-		for (const row of [...this.rows]) {
+		for (const row of this.rows) {
 			if (!includeForgotten && row.memory.status !== "active") continue;
 			yield row;
 		}

@@ -76,7 +76,7 @@ export async function openSqliteDatabase(
 }
 
 function hasParams(params: SqliteParams | undefined): params is SqliteParams {
-	return !!params && Object.keys(params).length > 0;
+	return params !== undefined;
 }
 
 async function openBunSqlite(
@@ -184,6 +184,7 @@ export class SqliteProvider implements FortuneProvider {
 	readonly name = "sqlite";
 	private readonly dbPath: string;
 	private db: SqliteDatabase | null = null;
+	private statements = new Map<string, SqliteStatement>();
 
 	constructor(dbPath: string) {
 		this.dbPath = dbPath;
@@ -193,6 +194,15 @@ export class SqliteProvider implements FortuneProvider {
 		if (!this.db)
 			throw new Error("SqliteProvider pas initialisé (init() d'abord)");
 		return this.db;
+	}
+
+	private statement(sql: string): SqliteStatement {
+		let cached = this.statements.get(sql);
+		if (!cached) {
+			cached = this.require().prepare(sql);
+			this.statements.set(sql, cached);
+		}
+		return cached;
 	}
 
 	async init(): Promise<void> {
@@ -232,6 +242,7 @@ export class SqliteProvider implements FortuneProvider {
 	async close(): Promise<void> {
 		this.db?.close();
 		this.db = null;
+		this.statements.clear();
 	}
 
 	private memoryToParams(
@@ -270,7 +281,7 @@ export class SqliteProvider implements FortuneProvider {
 	): Promise<void> {
 		memory.contentHash =
 			memory.contentHash ?? memoryContentHash(memory.content);
-		this.require().prepare(INSERT).run(this.memoryToParams(memory, vector));
+		this.statement(INSERT).run(this.memoryToParams(memory, vector));
 	}
 
 	async updateStatus(
@@ -278,11 +289,9 @@ export class SqliteProvider implements FortuneProvider {
 		status: "active" | "forgotten",
 		at: string,
 	): Promise<boolean> {
-		const result = this.require()
-			.prepare(
-				"UPDATE fortune_memories SET status = $status, forgotten_at = $forgotten_at, updated_at = $at WHERE id = $id",
-			)
-			.run({
+		const result = this.statement(
+			"UPDATE fortune_memories SET status = $status, forgotten_at = $forgotten_at, updated_at = $at WHERE id = $id",
+		).run({
 				$id: id,
 				$status: status,
 				$at: at,
@@ -295,11 +304,9 @@ export class SqliteProvider implements FortuneProvider {
 		id: string,
 		includeForgotten = false,
 	): Promise<MemoryRecord | null> {
-		const row = this.require()
-			.prepare(
-				"SELECT *, vector AS vector_raw FROM fortune_memories WHERE id = $id AND (status = 'active' OR $includeForgotten)",
-			)
-			.get({
+		const row = this.statement(
+			"SELECT *, vector AS vector_raw FROM fortune_memories WHERE id = $id AND (status = 'active' OR $includeForgotten)",
+		).get({
 				$id: id,
 				$includeForgotten: includeForgotten ? 1 : 0,
 			});
@@ -307,24 +314,21 @@ export class SqliteProvider implements FortuneProvider {
 	}
 
 	async *iterate(includeForgotten = false): AsyncIterable<StoredRow> {
-		const db = this.require();
 		const sql = includeForgotten
 			? "SELECT *, vector AS vector_raw FROM fortune_memories ORDER BY created_at DESC"
 			: "SELECT *, vector AS vector_raw FROM fortune_memories WHERE status = 'active' ORDER BY created_at DESC";
-		for (const row of db.prepare(sql).all()) {
+		for (const row of this.statement(sql).all()) {
 			yield { memory: rowToMemory(row), vector: parseVector(row.vector_raw) };
 		}
 	}
 
 	async count(): Promise<{ active: number; forgotten: number }> {
-		const row = this.require()
-			.prepare(
-				`SELECT
+		const row = this.statement(
+			`SELECT
            COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) AS active,
            COALESCE(SUM(CASE WHEN status != 'active' THEN 1 ELSE 0 END), 0) AS forgotten
          FROM fortune_memories`,
-			)
-			.get() as unknown as { active: number; forgotten: number };
+		).get() as unknown as { active: number; forgotten: number };
 		return {
 			active: Number(row.active) || 0,
 			forgotten: Number(row.forgotten) || 0,

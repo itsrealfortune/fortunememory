@@ -164,10 +164,16 @@ export function normalizeMemory(
 	const summary = String(input.summary ?? "")
 		.trim()
 		.slice(0, 500);
-	const tags = (Array.isArray(input.tags) ? input.tags : [])
-		.map((tag) => String(tag).trim().slice(0, 80).toLowerCase())
-		.filter(Boolean)
-		.slice(0, 50);
+	const rawTags = Array.isArray(input.tags) ? input.tags : [];
+	const seen = new Set<string>();
+	const tags: string[] = [];
+	for (const entry of rawTags) {
+		if (tags.length >= 50) break;
+		const tag = String(entry).trim().slice(0, 80).toLowerCase();
+		if (!tag || seen.has(tag)) continue;
+		seen.add(tag);
+		tags.push(tag);
+	}
 
 	const timestamp = now.toISOString();
 	return {
@@ -191,7 +197,7 @@ export function normalizeMemory(
 		validFrom,
 		validTo,
 		occurredAt,
-		tags: [...new Set(tags)],
+		tags,
 		status: "active",
 		createdAt: timestamp,
 		updatedAt: timestamp,

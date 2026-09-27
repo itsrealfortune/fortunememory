@@ -573,7 +573,7 @@ function fuseRankings(
 		if (kind === "lexical") current.lexicalRank = rank;
 		if (kind === "vector") {
 			current.vectorRank = rank;
-			current.vectorSimilarity = Number(hit.vectorScore!.toFixed(4));
+			current.vectorSimilarity = hit.vectorScore ?? null;
 		}
 		fused.set(hit.memory.id, current);
 	};
@@ -600,7 +600,10 @@ function fuseRankings(
 		match: {
 			lexicalRank: item.lexicalRank,
 			vectorRank: item.vectorRank,
-			vectorSimilarity: item.vectorSimilarity,
+			vectorSimilarity:
+				item.vectorSimilarity === null
+					? null
+					: Number(item.vectorSimilarity.toFixed(4)),
 		},
 	}));
 }
