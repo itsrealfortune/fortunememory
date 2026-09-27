@@ -123,7 +123,10 @@ export class FortuneMemoryManager {
 		hash: string,
 		scope: string,
 	): Promise<MemoryRecord | null> {
-		for await (const row of this.provider.iterate(false)) {
+		for await (const row of this.provider.iterate(false, {
+			withVectors: false,
+			scopePrefix: scope,
+		})) {
 			const existing = row.memory;
 			const existingHash =
 				existing.contentHash ?? memoryContentHash(existing.content);
@@ -193,7 +196,10 @@ export class FortuneMemoryManager {
 	): Promise<MemoryRecord[]> {
 		const limit = clamp(options.limit ?? 20, 1, 100);
 		const candidates = await this.filterRows(
-			this.provider.iterate(false),
+			this.provider.iterate(false, {
+				withVectors: false,
+				scopePrefix: options.scope,
+			}),
 			options,
 		);
 		const decorated = candidates.map((row) => ({
@@ -215,7 +221,13 @@ export class FortuneMemoryManager {
 		const limit = clamp(options.limit ?? 10, 1, 50);
 		const retrieval = (options.retrieval ?? "hybrid") as RetrievalMode;
 
-		const rows = await this.filterRows(this.provider.iterate(false), options);
+		const rows = await this.filterRows(
+			this.provider.iterate(false, {
+				withVectors: retrieval !== "lexical",
+				scopePrefix: options.scope,
+			}),
+			options,
+		);
 		if (!rows.length) return [];
 		const queryTokens = tokenize(query);
 		if (!queryTokens.length) {
@@ -261,11 +273,14 @@ export class FortuneMemoryManager {
 		const queryTokens = tokenize(input.content);
 		if (!queryTokens.length) return [];
 
-		const rows = await this.filterRows(this.provider.iterate(false), {
-			scope: input.scope,
-			type: String(input.type) as MemoryType,
-			maxSensitivity: "restricted",
-		});
+		const rows = await this.filterRows(
+			this.provider.iterate(false, { scopePrefix: input.scope }),
+			{
+				scope: input.scope,
+				type: String(input.type) as MemoryType,
+				maxSensitivity: "restricted",
+			},
+		);
 		const queryVector = await this.vectorProvider.encode(input.content);
 
 		return this.rankConflicts(rows, queryVector, threshold, limit, input);

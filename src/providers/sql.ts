@@ -7,7 +7,11 @@
  */
 
 import { memoryContentHash, type MemoryRecord } from "../schema.ts";
-import type { FortuneProvider, StoredRow } from "./interface.ts";
+import type {
+	FortuneProvider,
+	IterateOptions,
+	StoredRow,
+} from "./interface.ts";
 
 const COLUMNS = [
 	"id",
@@ -183,16 +187,34 @@ export class PgliteProvider implements FortuneProvider {
 		return row ? rowToMemory(row as never) : null;
 	}
 
-	async *iterate(includeForgotten = false): AsyncIterable<StoredRow> {
+	async *iterate(
+		includeForgotten = false,
+		opts: IterateOptions = {},
+	): AsyncIterable<StoredRow> {
 		const client = await this.require();
-		const sql = includeForgotten
-			? "SELECT * FROM fortune_memories ORDER BY created_at DESC"
-			: "SELECT * FROM fortune_memories WHERE status='active' ORDER BY created_at DESC";
-		const result = await client.query(sql);
+		const columns =
+			opts.withVectors === false
+				? COLUMNS.filter((column) => column !== "vector").join(", ")
+				: "*";
+		const conditions: string[] = [];
+		const params: unknown[] = [];
+		if (!includeForgotten) conditions.push("status='active'");
+		if (opts.scopePrefix) {
+			conditions.push(`(scope=$${params.length + 1} OR scope LIKE $${params.length + 2})`);
+			params.push(opts.scopePrefix, `${opts.scopePrefix}/%`);
+		}
+		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+		const result = await client.query(
+			`SELECT ${columns} FROM fortune_memories ${where} ORDER BY created_at DESC`,
+			params.length ? params : undefined,
+		);
 		for (const row of result.rows ?? []) {
 			yield {
 				memory: rowToMemory(row as never),
-				vector: parseVector((row as never as { vector?: unknown }).vector),
+				vector:
+					opts.withVectors === false
+						? null
+						: parseVector((row as never as { vector?: unknown }).vector),
 			};
 		}
 	}
@@ -352,15 +374,33 @@ export class MysqlProvider implements FortuneProvider {
 		return rows.length ? rowToMemory(rows[0]!) : null;
 	}
 
-	async *iterate(includeForgotten = false): AsyncIterable<StoredRow> {
-		const sql = includeForgotten
-			? "SELECT * FROM fortune_memories ORDER BY created_at DESC"
-			: "SELECT * FROM fortune_memories WHERE status='active' ORDER BY created_at DESC";
-		const rows = (await this.query(sql)) as Array<Record<string, unknown>>;
+	async *iterate(
+		includeForgotten = false,
+		opts: IterateOptions = {},
+	): AsyncIterable<StoredRow> {
+		const columns =
+			opts.withVectors === false
+				? COLUMNS.filter((column) => column !== "vector").join(", ")
+				: "*";
+		const conditions: string[] = [];
+		const params: unknown[] = [];
+		if (!includeForgotten) conditions.push("status='active'");
+		if (opts.scopePrefix) {
+			conditions.push("(scope=? OR scope LIKE ?)");
+			params.push(opts.scopePrefix, `${opts.scopePrefix}/%`);
+		}
+		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+		const sql =
+			`SELECT ${columns} FROM fortune_memories ${where} ORDER BY created_at DESC`;
+		const rows = (await this.query(
+			sql,
+			params.length ? params : undefined,
+		)) as Array<Record<string, unknown>>;
 		for (const row of rows) {
 			yield {
 				memory: rowToMemory(row),
-				vector: parseVector(row.vector),
+				vector:
+					opts.withVectors === false ? null : parseVector(row.vector),
 			};
 		}
 	}

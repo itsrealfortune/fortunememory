@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { memoryContentHash, type MemoryRecord } from "../schema.ts";
-import type { FortuneProvider, StoredRow } from "./interface.ts";
+import type { FortuneProvider, IterateOptions, StoredRow } from "./interface.ts";
 
 interface PersistedPayload {
 	version: 1;
@@ -114,9 +114,19 @@ export class JsonProvider implements FortuneProvider {
 		return null;
 	}
 
-	async *iterate(includeForgotten = false): AsyncIterable<StoredRow> {
+	async *iterate(
+		includeForgotten = false,
+		opts: IterateOptions = {},
+	): AsyncIterable<StoredRow> {
+		const prefix = opts.scopePrefix;
 		for (const row of this.rows) {
 			if (!includeForgotten && row.memory.status !== "active") continue;
+			if (
+				prefix &&
+				row.memory.scope !== prefix &&
+				!row.memory.scope.startsWith(`${prefix}/`)
+			)
+				continue;
 			yield row;
 		}
 	}

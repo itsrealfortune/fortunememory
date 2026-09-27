@@ -12,7 +12,11 @@
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { memoryContentHash, type MemoryRecord } from "../schema.ts";
-import type { FortuneProvider, StoredRow } from "./interface.ts";
+import type {
+	FortuneProvider,
+	IterateOptions,
+	StoredRow,
+} from "./interface.ts";
 
 /** Ligne SQLite brute. */
 export type SqliteRow = Record<string, unknown>;
@@ -313,12 +317,39 @@ export class SqliteProvider implements FortuneProvider {
 		return row ? rowToMemory(row) : null;
 	}
 
-	async *iterate(includeForgotten = false): AsyncIterable<StoredRow> {
-		const sql = includeForgotten
-			? "SELECT *, vector AS vector_raw FROM fortune_memories ORDER BY created_at DESC"
-			: "SELECT *, vector AS vector_raw FROM fortune_memories WHERE status = 'active' ORDER BY created_at DESC";
-		for (const row of this.statement(sql).all()) {
-			yield { memory: rowToMemory(row), vector: parseVector(row.vector_raw) };
+	async *iterate(
+		includeForgotten = false,
+		opts: IterateOptions = {},
+	): AsyncIterable<StoredRow> {
+		const columns = opts.withVectors === false
+			? "id, type, content, summary, source_kind, source_locator, source_title, scope, sensitivity, source_trust, confidence, valid_from, valid_to, occurred_at, tags, status, created_at, updated_at, forgotten_at, content_hash"
+			: "*, vector AS vector_raw";
+		const conditions: string[] = [];
+		if (!includeForgotten) conditions.push("status = 'active'");
+		if (opts.scopePrefix) {
+			conditions.push(
+				"(scope = $scope OR scope LIKE $scope_prefix ESCAPE '\\')",
+			);
+		}
+		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+		const sql =
+			`SELECT ${columns} FROM fortune_memories ${where} ORDER BY created_at DESC`;
+		const escapeLike = (value: string): string =>
+			value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+		const params: SqliteParams | undefined = opts.scopePrefix
+			? {
+					$scope: opts.scopePrefix,
+					$scope_prefix: `${escapeLike(opts.scopePrefix)}/%`,
+				}
+			: undefined;
+		for (const row of this.statement(sql).all(params)) {
+			yield {
+				memory: rowToMemory(row),
+				vector:
+					opts.withVectors === false
+						? null
+						: parseVector(row.vector_raw),
+			};
 		}
 	}
 
