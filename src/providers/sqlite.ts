@@ -338,12 +338,14 @@ export class SqliteProvider implements FortuneProvider {
 		id: string,
 		includeForgotten = false,
 	): Promise<MemoryRecord | null> {
-		const row = this.statement(
-			"SELECT *, vector AS vector_raw FROM fortune_memories WHERE id = $id AND (status = 'active' OR $includeForgotten)",
-		).get({
-			$id: id,
-			$includeForgotten: includeForgotten ? 1 : 0,
-		});
+		// Deux requêtes statiques : pas de OR paramétré qui invalide l'index.
+		const row = includeForgotten
+			? this.statement(
+					"SELECT *, vector AS vector_raw, vector_blob AS vector_blob_raw FROM fortune_memories WHERE id = $id",
+				).get({ $id: id })
+			: this.statement(
+					"SELECT *, vector AS vector_raw, vector_blob AS vector_blob_raw FROM fortune_memories WHERE id = $id AND status = 'active'",
+				).get({ $id: id });
 		return row ? rowToMemory(row) : null;
 	}
 
@@ -362,17 +364,26 @@ export class SqliteProvider implements FortuneProvider {
 				"(scope = $scope OR scope LIKE $scope_prefix ESCAPE '\\')",
 			);
 		}
+		if (opts.asOf) {
+			// Préfiltre large (ordre lexicographique = chronologique sur
+			// dates UTC normalisées) ; le manager revérifie à la borne exacte.
+			conditions.push(
+				"(valid_from IS NULL OR valid_from <= $asof)",
+				"(valid_to IS NULL OR valid_to >= $asof)",
+			);
+		}
 		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 		const sql = `SELECT ${columns} FROM fortune_memories ${where} ORDER BY created_at DESC`;
 		const escapeLike = (value: string): string =>
 			value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
-		const params: SqliteParams | undefined = opts.scopePrefix
-			? {
-					$scope: opts.scopePrefix,
-					$scope_prefix: `${escapeLike(opts.scopePrefix)}/%`,
-				}
-			: undefined;
-		for (const row of this.statement(sql).all(params)) {
+		const params: SqliteParams = {};
+		if (opts.scopePrefix) {
+			params.$scope = opts.scopePrefix;
+			params.$scope_prefix = `${escapeLike(opts.scopePrefix)}/%`;
+		}
+		if (opts.asOf) params.$asof = opts.asOf;
+		const bound = Object.keys(params).length ? params : undefined;
+		for (const row of this.statement(sql).all(bound)) {
 			yield {
 				memory: rowToMemory(row),
 				vector:

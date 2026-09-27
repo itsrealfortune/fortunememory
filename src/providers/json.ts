@@ -8,7 +8,7 @@ import {
 	existsSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { memoryContentHash, type MemoryRecord } from "../schema.ts";
+import { inWindow, memoryContentHash, type MemoryRecord } from "../schema.ts";
 import type {
 	FortuneProvider,
 	IterateOptions,
@@ -120,12 +120,18 @@ export class JsonProvider implements FortuneProvider {
 		opts: IterateOptions = {},
 	): AsyncIterable<StoredRow> {
 		const prefix = opts.scopePrefix;
+		const asOf = opts.asOf;
 		for (const row of this.rows) {
 			if (!includeForgotten && row.memory.status !== "active") continue;
 			if (
 				prefix &&
 				row.memory.scope !== prefix &&
 				!row.memory.scope.startsWith(`${prefix}/`)
+			)
+				continue;
+			if (
+				asOf &&
+				!inWindow(row.memory.validFrom, row.memory.validTo, asOf)
 			)
 				continue;
 			yield row;

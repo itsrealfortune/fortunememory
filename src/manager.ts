@@ -16,6 +16,7 @@
 import {
 	SENSITIVITY_LEVELS,
 	SOURCE_TRUST_LEVELS,
+	inWindow,
 	memoryContentHash,
 	normalizeMemory,
 	type MemoryDraft,
@@ -199,6 +200,7 @@ export class FortuneMemoryManager {
 			this.provider.iterate(false, {
 				withVectors: false,
 				scopePrefix: options.scope,
+				asOf: options.asOf,
 			}),
 			options,
 		);
@@ -225,6 +227,7 @@ export class FortuneMemoryManager {
 			this.provider.iterate(false, {
 				withVectors: retrieval !== "lexical",
 				scopePrefix: options.scope,
+				asOf: options.asOf,
 			}),
 			options,
 		);
@@ -362,7 +365,6 @@ export class FortuneMemoryManager {
 		options: SearchOptions & { asOf?: string },
 	): Promise<Array<{ memory: MemoryRecord; vector: number[] | null }>> {
 		const asOf = options.asOf ?? new Date().toISOString();
-		const asOfTime = Date.parse(asOf);
 		const maxSensitivityRank = SENSITIVITY_RANK(
 			options.maxSensitivity ?? "restricted",
 		);
@@ -377,8 +379,7 @@ export class FortuneMemoryManager {
 			if (options.type && memory.type !== options.type) continue;
 			if (SENSITIVITY_RANK(memory.sensitivity) > maxSensitivityRank) continue;
 			if (TRUST_RANK(memory.sourceTrust) < minTrustRank) continue;
-			if (memory.validFrom && Date.parse(memory.validFrom) > asOfTime) continue;
-			if (memory.validTo && Date.parse(memory.validTo) < asOfTime) continue;
+			if (!inWindow(memory.validFrom, memory.validTo, asOf)) continue;
 			if (options.excludeContent && memory.content === options.excludeContent)
 				continue;
 			rows.push(row);

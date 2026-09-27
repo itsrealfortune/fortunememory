@@ -97,6 +97,29 @@ export function memoryContentHash(content: string): string {
 		.digest("hex");
 }
 
+/**
+ * Fenêtre validFrom/validTo vs asOf. Fast-path lexicographique quand les
+ * deux bornes sont en UTC canonique (`Z`, normalisé à l'écriture) ;
+ * repli Date.parse pour les lignes legacy avec offsets.
+ */
+export function inWindow(
+	validFrom: string | null | undefined,
+	validTo: string | null | undefined,
+	asOf: string,
+): boolean {
+	if (validFrom) {
+		if (validFrom.endsWith("Z") && asOf.endsWith("Z")) {
+			if (validFrom > asOf) return false;
+		} else if (Date.parse(validFrom) > Date.parse(asOf)) return false;
+	}
+	if (validTo) {
+		if (validTo.endsWith("Z") && asOf.endsWith("Z")) {
+			if (validTo < asOf) return false;
+		} else if (Date.parse(validTo) < Date.parse(asOf)) return false;
+	}
+	return true;
+}
+
 const DATE_RE =
 	/^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:?\d{2})?$/;
 
@@ -114,7 +137,9 @@ function optionalDate(
 	if (!Number.isFinite(time)) {
 		throw new Error(`${field} doit être une date ISO avec offset`);
 	}
-	return text;
+	// Normalisé UTC : la comparaison lexicographique vaut comparaison
+	// chronologique (pushdown SQL + filtres JS sans Date.parse par ligne).
+	return new Date(time).toISOString();
 }
 
 function explain(message: string): never {

@@ -19,6 +19,10 @@ export interface IterateOptions {
 	withVectors?: boolean;
 	/** Restreint au scope exact ou préfixe `scope/` (poussé en SQL si possible). */
 	scopePrefix?: string;
+	/** Fenêtre temporelle ISO UTC (poussée en SQL si possible ; les dates
+	 * stockées sont normalisées UTC donc l'ordre lexicographique vaut
+	 * chronologique). */
+	asOf?: string;
 }
 
 export interface FortuneProvider {
