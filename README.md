@@ -122,4 +122,33 @@ npm run build
 npm test
 ```
 
-Release: `npm run publish-package` (tag `fortunememory-v*` → npm publish via GitHub Actions).
+Release: `npm run publish-package` (tag `v*` → npm publish via GitHub Actions).
+
+## Changelog
+
+### v1.0.2 — CPU optimization pass
+
+Hot-path optimization of `search` / `remember` (no algorithm changes: exact full-scan scoring preserved, all 75 tests green).
+
+<details>
+<summary>Benchmark per commit (N=500, sqlite, avg/op — click to expand)</summary>
+
+| Op | base | HIGH | MED | LOW | scan | fix | Speedup |
+|---|---|---|---|---|---|---|---|
+| `remember` | 7.28 ms | 7.22 | 7.21 | 7.12 | 0.70 | 0.50 | **14.5×** |
+| `search hybrid` | 19.45 ms | 17.97 | 19.13 | 18.18 | 18.25 | 11.93 | **1.6×** |
+| `search lexical` | 18.36 ms | 16.89 | 17.43 | 16.52 | 4.38 | 3.45 | **5.3×** |
+| `search vector` | 17.50 ms | 17.44 | 17.37 | 17.19 | 17.21 | 11.05 | **1.6×** |
+| `list` | 17.30 ms | 17.06 | 17.05 | 16.44 | 4.11 | 3.34 | **5.2×** |
+| `findConflicts` | 17.53 ms | 16.58 | 16.36 | 16.23 | 2.34 | 1.21 | **14.5×** |
+| `getContext` | 19.26 ms | 17.78 | 17.85 | 18.28 | 17.77 | 11.47 | **1.7×** |
+
+- **HIGH**: rank `Map`s, lexical token cache, `dot()` fast path for L2-normalized vectors, `content_hash` column, decorate-sort `list`.
+- **MED**: `Map<id,index>` in file providers, no-copy iteration, cached sqlite statements, chunked `csvParse`, single-pass tag dedup.
+- **LOW**: dead-code removal (`iterActive`, unused params, double filters), precomputed UPSERT, crash-safe tag parsing.
+- **scan**: `IterateOptions{withVectors, scopePrefix}` — lazy vector loading + scope pushdown to SQL (the main lever).
+- **fix**: sqlite `vector_blob` (versioned Float32, ~1 KB/row) instead of JSON text transfer, legacy fallback + backfill.
+
+Reproduce with `node scripts/bench.mjs` (after `npm run build`).
+
+</details>
