@@ -419,21 +419,32 @@ function parseVector(raw: unknown): number[] | null {
 /** Encodage binaire Float32 natif : ~1 Ko/ligne, parse sans JSON. */
 function encodeVectorBlob(vector: number[]): Uint8Array {
 	const floats = new Float32Array(vector);
-	return new Uint8Array(
-		floats.buffer,
-		floats.byteOffset,
-		floats.byteLength,
+	const out = new Uint8Array(1 + floats.byteLength);
+	out[0] = 1; // version 1 = Float32
+	out.set(
+		new Uint8Array(floats.buffer, floats.byteOffset, floats.byteLength),
+		1,
 	);
+	return out;
 }
 
 function decodeVectorBlob(raw: Uint8Array): number[] | null {
-	if (raw.byteLength % 4 !== 0 || raw.byteLength === 0) return null;
-	// Legacy Float64 (8 octets/composante) ou courant Float32 (4 octets).
-	const bytesPerComponent = raw.byteLength % 8 === 0 ? 8 : 4;
-	const floats =
-		bytesPerComponent === 8
-			? new Float64Array(raw.buffer, raw.byteOffset, raw.byteLength / 8)
-			: new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
+	if (raw.byteLength === 0) return null;
+	if (raw[0] === 1 && (raw.byteLength - 1) % 4 === 0) {
+		const count = (raw.byteLength - 1) / 4;
+		const aligned = new Uint8Array(count * 4);
+		aligned.set(raw.subarray(1));
+		return Array.from(
+			new Float32Array(aligned.buffer, aligned.byteOffset, count),
+		);
+	}
+	// Legacy : Float64 brut sans header (8 octets/composante).
+	if (raw.byteLength % 8 !== 0) return null;
+	const floats = new Float64Array(
+		raw.buffer,
+		raw.byteOffset,
+		raw.byteLength / 8,
+	);
 	return Array.from(floats);
 }
 
