@@ -45,6 +45,7 @@
 		"build": "tsc --project tsconfig.json",
 		"typecheck": "tsc --noEmit --project tsconfig.json",
 		"test": "npm run build && node ./dist/test.js",
+		"bench": "npm run build && node scripts/bench.mjs",
 		"check": "bunx --bun @biomejs/biome check ./src",
 		"lint": "bunx --bun @biomejs/biome lint ./src",
 		"lint:write": "bunx --bun @biomejs/biome lint --write ./src",

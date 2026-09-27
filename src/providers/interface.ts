@@ -19,6 +19,10 @@ export interface IterateOptions {
 	withVectors?: boolean;
 	/** Restreint au scope exact ou préfixe `scope/` (poussé en SQL si possible). */
 	scopePrefix?: string;
+	/** Fenêtre temporelle ISO UTC (poussée en SQL si possible ; les dates
+	 * stockées sont normalisées UTC donc l'ordre lexicographique vaut
+	 * chronologique). */
+	asOf?: string;
 }
 
 export interface FortuneProvider {
@@ -31,6 +35,12 @@ export interface FortuneProvider {
 
 	/** Insertion complète (record déjà normalisé + vecteur encodé ou null). */
 	addMemory(memory: MemoryRecord, vector: number[] | null): Promise<void>;
+
+	/** Insertion groupée (défaut : boucle addMemory). Les providers fichier
+	 * ne flushent qu'une fois ; les providers SQL en une transaction. */
+	addMany?(
+		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+	): Promise<void>;
 
 	/** Soft-delete : status=forgotten + forgottenAt. Retourne false si id inconnu. */
 	updateStatus(

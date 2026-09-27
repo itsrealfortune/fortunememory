@@ -12,7 +12,7 @@ import {
 	renameSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { memoryContentHash, type MemoryRecord } from "../schema.ts";
+import { inWindow, memoryContentHash, type MemoryRecord } from "../schema.ts";
 import type {
 	FortuneProvider,
 	IterateOptions,
@@ -192,6 +192,24 @@ export class CsvProvider implements FortuneProvider {
 		appendFileSync(this.filePath, csvLine(row));
 	}
 
+	async addMany(
+		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+	): Promise<void> {
+		if (!entries.length) return;
+		const base = this.rows.length;
+		const lines = new Array<string>(entries.length);
+		for (let i = 0; i < entries.length; i++) {
+			const row: StoredRow = {
+				memory: entries[i]!.memory,
+				vector: entries[i]!.vector,
+			};
+			this.index.set(row.memory.id, base + i);
+			this.rows.push(row);
+			lines[i] = csvLine(row);
+		}
+		appendFileSync(this.filePath, lines.join(""));
+	}
+
 	async updateStatus(
 		id: string,
 		status: "active" | "forgotten",
@@ -224,6 +242,7 @@ export class CsvProvider implements FortuneProvider {
 		opts: IterateOptions = {},
 	): AsyncIterable<StoredRow> {
 		const prefix = opts.scopePrefix;
+		const asOf = opts.asOf;
 		for (const row of this.rows) {
 			if (!includeForgotten && row.memory.status !== "active") continue;
 			if (
@@ -231,6 +250,8 @@ export class CsvProvider implements FortuneProvider {
 				row.memory.scope !== prefix &&
 				!row.memory.scope.startsWith(`${prefix}/`)
 			)
+				continue;
+			if (asOf && !inWindow(row.memory.validFrom, row.memory.validTo, asOf))
 				continue;
 			yield row;
 		}

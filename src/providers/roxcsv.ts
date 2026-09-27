@@ -30,7 +30,7 @@ import {
 	rowToMemory,
 	parseVector,
 } from "./csv.ts";
-import { memoryContentHash, type MemoryRecord } from "../schema.ts";
+import { inWindow, memoryContentHash, type MemoryRecord } from "../schema.ts";
 import type {
 	FortuneProvider,
 	IterateOptions,
@@ -41,6 +41,7 @@ export class RoxifiedCSVProvider implements FortuneProvider {
 	readonly name = "roxcsv";
 	private readonly filePath: string;
 	private rows: StoredRow[] = [];
+	private readonly index = new Map<string, number>();
 
 	constructor(filePath: string) {
 		this.filePath = filePath;
@@ -61,6 +62,10 @@ export class RoxifiedCSVProvider implements FortuneProvider {
 						memory: rowToMemory(record),
 						vector: parseVector(record.vector ?? null),
 					});
+					this.index.set(
+						this.rows[this.rows.length - 1]!.memory.id,
+						this.rows.length - 1,
+					);
 				} catch {
 					// ligne corrompue : on la saute (le PNG reste jouable)
 				}
@@ -97,11 +102,33 @@ export class RoxifiedCSVProvider implements FortuneProvider {
 		memory.contentHash =
 			memory.contentHash ?? memoryContentHash(memory.content);
 		const row: StoredRow = { memory, vector };
-		const index = this.rows.findIndex(
-			(candidate) => candidate.memory.id === memory.id,
-		);
+		const index = this.index.get(memory.id) ?? -1;
 		if (index >= 0) this.rows[index] = row;
-		else this.rows.push(row);
+		else {
+			this.index.set(memory.id, this.rows.length);
+			this.rows.push(row);
+		}
+		await this.flush();
+	}
+
+	async addMany(
+		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+	): Promise<void> {
+		if (!entries.length) return;
+		for (const entry of entries) {
+			entry.memory.contentHash =
+				entry.memory.contentHash ?? memoryContentHash(entry.memory.content);
+			const slot = this.index.get(entry.memory.id);
+			const stored: StoredRow = {
+				memory: entry.memory,
+				vector: entry.vector,
+			};
+			if (slot !== undefined) this.rows[slot] = stored;
+			else {
+				this.index.set(entry.memory.id, this.rows.length);
+				this.rows.push(stored);
+			}
+		}
 		await this.flush();
 	}
 
@@ -110,7 +137,8 @@ export class RoxifiedCSVProvider implements FortuneProvider {
 		status: "active" | "forgotten",
 		at: string,
 	): Promise<boolean> {
-		const row = this.rows.find((candidate) => candidate.memory.id === id);
+		const slot = this.index.get(id);
+		const row = slot !== undefined ? this.rows[slot] : undefined;
 		if (!row) return false;
 		row.memory.status = status;
 		row.memory.forgottenAt = status === "forgotten" ? at : null;
@@ -123,15 +151,12 @@ export class RoxifiedCSVProvider implements FortuneProvider {
 		id: string,
 		includeForgotten = false,
 	): Promise<MemoryRecord | null> {
-		const row = this.rows.find(
-			(candidate) =>
-				candidate.memory.id === id &&
-				(includeForgotten || candidate.memory.status === "active"),
-		);
-		if (row && !row.memory.contentHash) {
-			row.memory.contentHash = memoryContentHash(row.memory.content);
+		const slot = this.index.get(id);
+		const row = slot !== undefined ? this.rows[slot] : undefined;
+		if (row && (includeForgotten || row.memory.status === "active")) {
+			return row.memory;
 		}
-		return row?.memory ?? null;
+		return null;
 	}
 
 	async *iterate(
@@ -139,6 +164,7 @@ export class RoxifiedCSVProvider implements FortuneProvider {
 		opts: IterateOptions = {},
 	): AsyncIterable<StoredRow> {
 		const prefix = opts.scopePrefix;
+		const asOf = opts.asOf;
 		for (const row of this.rows) {
 			if (!includeForgotten && row.memory.status !== "active") continue;
 			if (
@@ -146,6 +172,8 @@ export class RoxifiedCSVProvider implements FortuneProvider {
 				row.memory.scope !== prefix &&
 				!row.memory.scope.startsWith(`${prefix}/`)
 			)
+				continue;
+			if (asOf && !inWindow(row.memory.validFrom, row.memory.validTo, asOf))
 				continue;
 			yield row;
 		}

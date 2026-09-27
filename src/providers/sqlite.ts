@@ -17,6 +17,7 @@ import type {
 	IterateOptions,
 	StoredRow,
 } from "./interface.ts";
+import { decodeVectorBlob, encodeVectorBlob } from "../vectors.ts";
 
 /** Ligne SQLite brute. */
 export type SqliteRow = Record<string, unknown>;
@@ -318,6 +319,30 @@ export class SqliteProvider implements FortuneProvider {
 		this.statement(INSERT).run(this.memoryToParams(memory, vector));
 	}
 
+	async addMany(
+		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+	): Promise<void> {
+		if (!entries.length) return;
+		const db = this.require();
+		const insert = this.statement(INSERT);
+		db.exec("BEGIN IMMEDIATE;");
+		try {
+			for (const entry of entries) {
+				entry.memory.contentHash =
+					entry.memory.contentHash ?? memoryContentHash(entry.memory.content);
+				insert.run(this.memoryToParams(entry.memory, entry.vector));
+			}
+			db.exec("COMMIT;");
+		} catch (error) {
+			try {
+				db.exec("ROLLBACK;");
+			} catch {
+				// Déjà en erreur, on propage l'originale.
+			}
+			throw error;
+		}
+	}
+
 	async updateStatus(
 		id: string,
 		status: "active" | "forgotten",
@@ -338,12 +363,14 @@ export class SqliteProvider implements FortuneProvider {
 		id: string,
 		includeForgotten = false,
 	): Promise<MemoryRecord | null> {
-		const row = this.statement(
-			"SELECT *, vector AS vector_raw FROM fortune_memories WHERE id = $id AND (status = 'active' OR $includeForgotten)",
-		).get({
-			$id: id,
-			$includeForgotten: includeForgotten ? 1 : 0,
-		});
+		// Deux requêtes statiques : pas de OR paramétré qui invalide l'index.
+		const row = includeForgotten
+			? this.statement(
+					"SELECT *, vector AS vector_raw, vector_blob AS vector_blob_raw FROM fortune_memories WHERE id = $id",
+				).get({ $id: id })
+			: this.statement(
+					"SELECT *, vector AS vector_raw, vector_blob AS vector_blob_raw FROM fortune_memories WHERE id = $id AND status = 'active'",
+				).get({ $id: id });
 		return row ? rowToMemory(row) : null;
 	}
 
@@ -362,17 +389,26 @@ export class SqliteProvider implements FortuneProvider {
 				"(scope = $scope OR scope LIKE $scope_prefix ESCAPE '\\')",
 			);
 		}
+		if (opts.asOf) {
+			// Préfiltre large (ordre lexicographique = chronologique sur
+			// dates UTC normalisées) ; le manager revérifie à la borne exacte.
+			conditions.push(
+				"(valid_from IS NULL OR valid_from <= $asof)",
+				"(valid_to IS NULL OR valid_to >= $asof)",
+			);
+		}
 		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 		const sql = `SELECT ${columns} FROM fortune_memories ${where} ORDER BY created_at DESC`;
 		const escapeLike = (value: string): string =>
 			value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
-		const params: SqliteParams | undefined = opts.scopePrefix
-			? {
-					$scope: opts.scopePrefix,
-					$scope_prefix: `${escapeLike(opts.scopePrefix)}/%`,
-				}
-			: undefined;
-		for (const row of this.statement(sql).all(params)) {
+		const params: SqliteParams = {};
+		if (opts.scopePrefix) {
+			params.$scope = opts.scopePrefix;
+			params.$scope_prefix = `${escapeLike(opts.scopePrefix)}/%`;
+		}
+		if (opts.asOf) params.$asof = opts.asOf;
+		const bound = Object.keys(params).length ? params : undefined;
+		for (const row of this.statement(sql).all(bound)) {
 			yield {
 				memory: rowToMemory(row),
 				vector:
@@ -412,38 +448,6 @@ function parseVector(raw: unknown): number[] | null {
 	} catch {
 		return null;
 	}
-}
-
-/** Encodage binaire Float32 natif : ~1 Ko/ligne, parse sans JSON. */
-function encodeVectorBlob(vector: number[]): Uint8Array {
-	const floats = new Float32Array(vector);
-	const out = new Uint8Array(1 + floats.byteLength);
-	out[0] = 1; // version 1 = Float32
-	out.set(
-		new Uint8Array(floats.buffer, floats.byteOffset, floats.byteLength),
-		1,
-	);
-	return out;
-}
-
-function decodeVectorBlob(raw: Uint8Array): number[] | null {
-	if (raw.byteLength === 0) return null;
-	if (raw[0] === 1 && (raw.byteLength - 1) % 4 === 0) {
-		const count = (raw.byteLength - 1) / 4;
-		const aligned = new Uint8Array(count * 4);
-		aligned.set(raw.subarray(1));
-		return Array.from(
-			new Float32Array(aligned.buffer, aligned.byteOffset, count),
-		);
-	}
-	// Legacy : Float64 brut sans header (8 octets/composante).
-	if (raw.byteLength % 8 !== 0) return null;
-	const floats = new Float64Array(
-		raw.buffer,
-		raw.byteOffset,
-		raw.byteLength / 8,
-	);
-	return Array.from(floats);
 }
 
 function rowToMemory(row: Record<string, unknown>): MemoryRecord {

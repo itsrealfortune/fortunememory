@@ -272,3 +272,56 @@ export function resolveVectorProvider(
 			);
 	}
 }
+
+/**
+ * Sérialisation binaire des vecteurs : 1 octet de version + Float32.
+ * ~1 Ko/ligne vs ~5 Ko en JSON, parse sans JSON.parse.
+ */
+export function encodeVectorBlob(vector: number[]): Uint8Array {
+	const floats = new Float32Array(vector);
+	const out = new Uint8Array(1 + floats.byteLength);
+	out[0] = 1; // version 1 = Float32
+	out.set(
+		new Uint8Array(floats.buffer, floats.byteOffset, floats.byteLength),
+		1,
+	);
+	return out;
+}
+
+export function decodeVectorBlob(raw: Uint8Array): number[] | null {
+	if (raw.byteLength === 0) return null;
+	if (raw[0] === 1 && (raw.byteLength - 1) % 4 === 0) {
+		const count = (raw.byteLength - 1) / 4;
+		const aligned = new Uint8Array(count * 4);
+		aligned.set(raw.subarray(1));
+		return Array.from(
+			new Float32Array(aligned.buffer, aligned.byteOffset, count),
+		);
+	}
+	// Legacy : Float64 brut sans header (8 octets/composante).
+	if (raw.byteLength % 8 !== 0) return null;
+	const floats = new Float64Array(
+		raw.buffer,
+		raw.byteOffset,
+		raw.byteLength / 8,
+	);
+	return Array.from(floats);
+}
+
+/** Blob binaire préféré, repli JSON legacy. */
+export function parseVectorBlob(blob: unknown, json: unknown): number[] | null {
+	if (
+		typeof Uint8Array !== "undefined" &&
+		(blob instanceof Uint8Array ||
+			(typeof Buffer !== "undefined" && Buffer.isBuffer(blob)))
+	) {
+		return decodeVectorBlob(blob as Uint8Array);
+	}
+	if (typeof json !== "string") return null;
+	try {
+		const parsed = JSON.parse(json);
+		return Array.isArray(parsed) ? parsed : null;
+	} catch {
+		return null;
+	}
+}

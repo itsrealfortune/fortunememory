@@ -25,7 +25,7 @@ import {
 	mkdirSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { memoryContentHash, type MemoryRecord } from "../schema.ts";
+import { inWindow, memoryContentHash, type MemoryRecord } from "../schema.ts";
 import type {
 	FortuneProvider,
 	IterateOptions,
@@ -41,6 +41,7 @@ export class RoxifyProvider implements FortuneProvider {
 	readonly name = "roxify";
 	private readonly filePath: string;
 	private rows: StoredRow[] = [];
+	private readonly index = new Map<string, number>();
 
 	constructor(filePath: string) {
 		this.filePath = filePath;
@@ -53,6 +54,13 @@ export class RoxifyProvider implements FortuneProvider {
 			const { buf } = await decodePngToBinary(png);
 			const payload = JSON.parse(buf.toString("utf8")) as PersistedPayload;
 			this.rows = Array.isArray(payload?.memories) ? payload.memories : [];
+			for (let i = 0; i < this.rows.length; i++) {
+				const row = this.rows[i]!;
+				this.index.set(row.memory.id, i);
+				if (!row.memory.contentHash) {
+					row.memory.contentHash = memoryContentHash(row.memory.content);
+				}
+			}
 		} else {
 			this.rows = [];
 			await this.flush(); // PNG initial écrit immédiatement
@@ -83,10 +91,34 @@ export class RoxifyProvider implements FortuneProvider {
 	): Promise<void> {
 		memory.contentHash =
 			memory.contentHash ?? memoryContentHash(memory.content);
-		const index = this.rows.findIndex((row) => row.memory.id === memory.id);
+		const index = this.index.get(memory.id) ?? -1;
 		const stored: StoredRow = { memory, vector };
 		if (index >= 0) this.rows[index] = stored;
-		else this.rows.push(stored);
+		else {
+			this.index.set(memory.id, this.rows.length);
+			this.rows.push(stored);
+		}
+		await this.flush();
+	}
+
+	async addMany(
+		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+	): Promise<void> {
+		if (!entries.length) return;
+		for (const entry of entries) {
+			entry.memory.contentHash =
+				entry.memory.contentHash ?? memoryContentHash(entry.memory.content);
+			const slot = this.index.get(entry.memory.id);
+			const stored: StoredRow = {
+				memory: entry.memory,
+				vector: entry.vector,
+			};
+			if (slot !== undefined) this.rows[slot] = stored;
+			else {
+				this.index.set(entry.memory.id, this.rows.length);
+				this.rows.push(stored);
+			}
+		}
 		await this.flush();
 	}
 
@@ -95,7 +127,8 @@ export class RoxifyProvider implements FortuneProvider {
 		status: "active" | "forgotten",
 		at: string,
 	): Promise<boolean> {
-		const row = this.rows.find((candidate) => candidate.memory.id === id);
+		const slot = this.index.get(id);
+		const row = slot !== undefined ? this.rows[slot] : undefined;
 		if (!row) return false;
 		row.memory.status = status;
 		row.memory.forgottenAt = status === "forgotten" ? at : null;
@@ -108,15 +141,15 @@ export class RoxifyProvider implements FortuneProvider {
 		id: string,
 		includeForgotten = false,
 	): Promise<MemoryRecord | null> {
-		const row = this.rows.find(
-			(candidate) =>
-				candidate.memory.id === id &&
-				(includeForgotten || candidate.memory.status === "active"),
-		);
-		if (row && !row.memory.contentHash) {
-			row.memory.contentHash = memoryContentHash(row.memory.content);
+		const slot = this.index.get(id);
+		const row = slot !== undefined ? this.rows[slot] : undefined;
+		if (row && (includeForgotten || row.memory.status === "active")) {
+			if (!row.memory.contentHash) {
+				row.memory.contentHash = memoryContentHash(row.memory.content);
+			}
+			return row.memory;
 		}
-		return row?.memory ?? null;
+		return null;
 	}
 
 	async *iterate(
@@ -124,6 +157,7 @@ export class RoxifyProvider implements FortuneProvider {
 		opts: IterateOptions = {},
 	): AsyncIterable<StoredRow> {
 		const prefix = opts.scopePrefix;
+		const asOf = opts.asOf;
 		for (const row of this.rows) {
 			if (!includeForgotten && row.memory.status !== "active") continue;
 			if (
@@ -131,6 +165,8 @@ export class RoxifyProvider implements FortuneProvider {
 				row.memory.scope !== prefix &&
 				!row.memory.scope.startsWith(`${prefix}/`)
 			)
+				continue;
+			if (asOf && !inWindow(row.memory.validFrom, row.memory.validTo, asOf))
 				continue;
 			yield row;
 		}
