@@ -1,8 +1,35 @@
 # fortunememory
 
-Durable local memory for agents: hybrid search (lexical + vector, RRF fusion), conflict detection, compact source-attributed contexts. Zero network by default, native `sqlite` provider (`node:sqlite`, no dependency).
+Durable local memory for AI agents, exposed as **native in-process tools** - not CLI subprocesses.
+
+Ported from [Open-Self](https://github.com/Open-Self/Open-Self)'s `ContextStore` (same memory model: hybrid lexical + vector search with RRF fusion, conflict detection, source-attributed contexts), repackaged so agents call it via `tool_call` instead of shelling out. Zero network by default, native `sqlite` provider (`node:sqlite`, no dependency).
 
 Ships with an OpenCode plugin (`opencode-plugin.ts`) that exposes the library as 7 native tools.
+
+## Why not just call `openself` from the agent?
+
+LLMs using openself go through its CLI: every `openself memory search …` spawns a fresh Node process - ~1.5 s of startup (heavy imports, DB open) before doing any work. Even `openself --help` takes that long. In an agentic loop that reads/writes memory dozens of times per task, the spawn cost dominates everything.
+
+fortunememory runs **in-process**: the OpenCode plugin calls the manager directly, so a `tool_call` costs the engine work only - sub-ms writes, ~12 ms hybrid searches.
+
+Measured on one machine (N=500, sqlite, same dataset - reproduce with `npm run bench:vs-openself`):
+
+| Op | fortunememory (`tool_call`) | openself CLI | Factor |
+|---|---|---|---|
+| `remember` / `memory add` | 0.45 ms | ~1510 ms | ~3300× |
+| `search` / `memory search` | ~12 ms | ~1600 ms | ~130× |
+
+Engine-to-engine (library vs library, CLI out of the picture) the gap is narrower - the big win is architectural, not algorithmic (`vector_blob` + dot-product fast path, cached lexical tokens vs JSON vectors + FTS round-trips):
+
+| Op | fortunememory | openself lib | Factor |
+|---|---|---|---|
+| `remember` | 0.45 ms | 0.55 ms | ~1.2× |
+| `search hybrid` | 11.7 ms | 43.6 ms | ~3.7× |
+| `search lexical` | 3.6 ms | 5.7 ms | ~1.6× |
+| `search vector` | ~12 ms | ~39 ms | ~3.3× |
+| `list` | 3.5 ms | 2.2 ms | 0.6× (openself faster) |
+| `findConflicts` | 1.5 ms | 1.7 ms | ~1.1× |
+| `getContext` | ~13 ms | ~45 ms | ~3.5× |
 
 ## Installation
 
@@ -16,13 +43,13 @@ Node `>=22.5` required (uses `node:sqlite`, experimental on 22, stable after).
 
 `opencode-plugin.ts` is a thin wrapper around this library: all business logic (manager, providers, vectors, schema) lives here. It declares 7 native tools:
 
-- `fortune_search_memory` — search active memories (browse mode without query)
-- `fortune_personal_context` — all active `personal` memories
-- `fortune_get_context` — compact source-attributed context block for the current task
-- `fortune_remember` — store a durable memory (with pre-check for conflicts)
-- `fortune_find_conflicts` — find conflicts before writing
-- `fortune_forget` — soft-delete by exact ID
-- `fortune_list_memory` — list most recent active memories
+- `fortune_search_memory` - search active memories (browse mode without query)
+- `fortune_personal_context` - all active `personal` memories
+- `fortune_get_context` - compact source-attributed context block for the current task
+- `fortune_remember` - store a durable memory (with pre-check for conflicts)
+- `fortune_find_conflicts` - find conflicts before writing
+- `fortune_forget` - soft-delete by exact ID
+- `fortune_list_memory` - list most recent active memories
 
 Memories are **data**: their content is never treated as instructions.
 
@@ -35,12 +62,12 @@ mkdir -p .opencode/plugins
 cp node_modules/fortunememory/opencode-plugin.ts .opencode/plugins/fortunememory.ts
 ```
 
-Or reference this repo directly. OpenCode loads every `*.ts` file in `.opencode/plugins` at startup — no further registration needed.
+Or reference this repo directly. OpenCode loads every `*.ts` file in `.opencode/plugins` at startup - no further registration needed.
 
 Plugin configuration via environment variables:
 
-- `FORTUNE_MEMORY_PROVIDER` — storage backend (default `sqlite`)
-- `FORTUNE_MEMORY_DATA_DIR` (fallback `DATA_DIR`) — store directory (default `<project>/data`)
+- `FORTUNE_MEMORY_PROVIDER` - storage backend (default `sqlite`)
+- `FORTUNE_MEMORY_DATA_DIR` (fallback `DATA_DIR`) - store directory (default `<project>/data`)
 
 ## Quick usage
 
@@ -96,21 +123,23 @@ const provider = await resolveProvider(
 
 ## API
 
-- `FortuneMemoryManager` — `remember`, `search`, `list`, `get`, `forget` (soft-delete), `findConflicts`, `getContext`, `stats`
-- `schema.ts` — `normalizeMemory`, `memoryContentHash`, `MEMORY_TYPES`, `SENSITIVITY_LEVELS`, `SOURCE_TRUST_LEVELS`
-- `vectors.ts` — `FeatureHashEncoder` (local, deterministic, 256 dims), `resolveVectorProvider` (`feature-hash` | `ollama` | `openai-compatible` via `FORTUNE_EMBEDDINGS`)
-- `migrate.ts` — `runMigrate()`: one-shot migration from legacy Open-Self vault to store (`fortune-migrate` CLI)
-- `vault-crypto.ts` — `VaultCodec` (AES-GCM decryption of the legacy vault, migration only)
+- `FortuneMemoryManager` - `remember`, `search`, `list`, `get`, `forget` (soft-delete), `findConflicts`, `getContext`, `stats`
+- `schema.ts` - `normalizeMemory`, `memoryContentHash`, `MEMORY_TYPES`, `SENSITIVITY_LEVELS`, `SOURCE_TRUST_LEVELS`
+- `vectors.ts` - `FeatureHashEncoder` (local, deterministic, 256 dims), `resolveVectorProvider` (`feature-hash` | `ollama` | `openai-compatible` via `FORTUNE_EMBEDDINGS`)
+- `migrate.ts` - `runMigrate()`: one-shot migration from legacy Open-Self vault to store (`fortune-migrate` CLI)
+- `vault-crypto.ts` - `VaultCodec` (AES-GCM decryption of the legacy vault, migration only)
 
 Memories are **data**: never treated as instructions.
 
+Migrating from an existing openself vault? `fortune-migrate` (or `runMigrate()`) imports `context.db` one-shot into any fortunememory provider; needs `OPENSELF_VAULT_KEY` only if the old vault was encrypted.
+
 ## Environment variables
 
-- `FORTUNE_MEMORY_PROVIDER` — `sqlite` (default) | `json` | `csv` | `pglite` | `mysql` | `roxify` | `roxcsv`
-- `FORTUNE_MEMORY_DATA_DIR` (else `DATA_DIR`) — store directory
-- `FORTUNE_MEMORY_MYSQL_URL` — MySQL DSN (default `mysql://root@127.0.0.1/fortunememory`)
-- `FORTUNE_EMBEDDINGS` — `feature-hash` (default) | `ollama` | `openai-compatible`
-- `OPENSELF_VAULT_KEY` — legacy vault key (migration only)
+- `FORTUNE_MEMORY_PROVIDER` - `sqlite` (default) | `json` | `csv` | `pglite` | `mysql` | `roxify` | `roxcsv`
+- `FORTUNE_MEMORY_DATA_DIR` (else `DATA_DIR`) - store directory
+- `FORTUNE_MEMORY_MYSQL_URL` - MySQL DSN (default `mysql://root@127.0.0.1/fortunememory`)
+- `FORTUNE_EMBEDDINGS` - `feature-hash` (default) | `ollama` | `openai-compatible`
+- `OPENSELF_VAULT_KEY` - legacy vault key (migration only)
 
 ## Dev
 
@@ -126,14 +155,14 @@ Release: `npm run publish-package` (tag `v*` → npm publish via GitHub Actions)
 
 ## Changelog
 
-### v1.0.3 — second optimization round + provider bugfixes
+### v1.0.3 - second optimization round + provider bugfixes
 
 No result changes, 75/75 tests green. All providers (sqlite, json, csv, pglite, mysql) now executed live and green.
 
 <details>
 <summary>Benchmarks: master (v1.0.2) vs round2 (click to expand)</summary>
 
-Standard bench (N=500, sqlite) — no regression, paths unchanged without validity windows or bulk writes:
+Standard bench (N=500, sqlite) - no regression, paths unchanged without validity windows or bulk writes:
 
 | Op | v1.0.2 | v1.0.3 | Factor |
 |---|---|---|---|
@@ -159,17 +188,17 @@ Targeted benches (paths this round actually touches):
 - `Map<id,index>` in rox providers; new optional `FortuneProvider.addMany()` (single transaction/flush/append, multi-row INSERT/REPLACE); `migrate.ts` writes once instead of O(N²) I/O; `npm run bench` script.
 
 **Bugfixes**
-- **mysql: all reads were broken** — `mysql2/promise` returns `[rows, fields]` tuples that were never unwrapped (`getMemory`, `search`, `list`, `count`, `updateStatus` all returned garbage while writes passed silently). Now unwrapped in `query()`/`execute()`. Verified live against MySQL 8.4 (12/12 checks).
+- **mysql: all reads were broken** - `mysql2/promise` returns `[rows, fields]` tuples that were never unwrapped (`getMemory`, `search`, `list`, `count`, `updateStatus` all returned garbage while writes passed silently). Now unwrapped in `query()`/`execute()`. Verified live against MySQL 8.4 (12/12 checks).
 - pglite verified live (15/15 checks: roundtrip, blob precision, pushdown, legacy `ALTER` migration).
 
 </details>
 
-### v1.0.2 — CPU optimization pass
+### v1.0.2 - CPU optimization pass
 
 Hot-path optimization of `search` / `remember` (no algorithm changes: exact full-scan scoring preserved, all 75 tests green).
 
 <details>
-<summary>Benchmark per commit (N=500, sqlite, avg/op — click to expand)</summary>
+<summary>Benchmark per commit (N=500, sqlite, avg/op - click to expand)</summary>
 
 | Op | base | HIGH | MED | LOW | scan | fix | Speedup |
 |---|---|---|---|---|---|---|---|
@@ -184,7 +213,7 @@ Hot-path optimization of `search` / `remember` (no algorithm changes: exact full
 - **HIGH**: rank `Map`s, lexical token cache, `dot()` fast path for L2-normalized vectors, `content_hash` column, decorate-sort `list`.
 - **MED**: `Map<id,index>` in file providers, no-copy iteration, cached sqlite statements, chunked `csvParse`, single-pass tag dedup.
 - **LOW**: dead-code removal (`iterActive`, unused params, double filters), precomputed UPSERT, crash-safe tag parsing.
-- **scan**: `IterateOptions{withVectors, scopePrefix}` — lazy vector loading + scope pushdown to SQL (the main lever).
+- **scan**: `IterateOptions{withVectors, scopePrefix}` - lazy vector loading + scope pushdown to SQL (the main lever).
 - **fix**: sqlite `vector_blob` (versioned Float32, ~1 KB/row) instead of JSON text transfer, legacy fallback + backfill.
 
 Reproduce with `node scripts/bench.mjs` (after `npm run build`).
