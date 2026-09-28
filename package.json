@@ -28,7 +28,7 @@
 	"bin": {
 		"fortune-migrate": "./dist/migrate.js"
 	},
-	"description": "Durable local memory for AI agents as native in-process tools (OpenCode plugin): hybrid search, conflicts, source-attributed context. Zero network, native sqlite.",
+	"description": "Durable local memory for AI agents as native in-process tools (OpenCode plugin): hybrid search, 7 storage backends, source-attributed context. Zero network, sqlite by default.",
 	"engines": {
 		"node": ">=22.5"
 	},

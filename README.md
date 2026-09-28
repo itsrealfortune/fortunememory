@@ -31,6 +31,14 @@ Engine-to-engine (library vs library, CLI out of the picture) the gap is narrowe
 | `findConflicts` | 1.5 ms | 1.7 ms | ~1.1× |
 | `getContext` | ~13 ms | ~45 ms | ~3.5× |
 
+Two differences, summarized:
+
+| | openself | fortunememory |
+|---|---|---|
+| Agent interface | CLI subprocess (`openself memory …`, ~1.5 s spawn per call) | native `tool_call`, in-process (OpenCode plugin) |
+| Storage | SQLite only | 7 providers: `sqlite`, `json`, `csv`, `pglite`, `mysql`, `roxify`, `roxcsv` |
+| Migration | — | `fortune-migrate` imports `context.db` one-shot into any provider |
+
 ## Installation
 
 ```bash
@@ -91,6 +99,8 @@ await provider.close();
 ```
 
 ## Providers
+
+openself is SQLite-only. fortunememory lets you pick the backend per deployment — same manager API, `FORTUNE_MEMORY_PROVIDER` to switch:
 
 | Name | Backend | Dependency |
 |---|---|---|
