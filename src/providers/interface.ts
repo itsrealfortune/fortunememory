@@ -1,7 +1,7 @@
 /**
  * Contrat commun à tous les stores FortuneMemory.
  *
- * Principe : le provider se contente de PERSISTER — les filtres (scope,
+ * Principe : le provider se contente de PERSISTER - les filtres (scope,
  * sensibilité, type, validité), le scoring (lexical, vectoriel, hybride RRF)
  * et le rangement vivent dans manager.ts. Volume visé : quelques milliers de
  * souvenirs → mais ces filtres restent corrects à toute échelle.

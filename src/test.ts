@@ -1,6 +1,6 @@
 /**
  * Tests fortunememory : `npm test` (build puis node dist/test.js).
- * Sans réseau — providers temp (json, csv, sqlite), feature-hash offline.
+ * Sans réseau - providers temp (json, csv, sqlite), feature-hash offline.
  * Les suites aux dépendances optionnelles (roxify) sont skippées si absentes.
  */
 

@@ -42,7 +42,7 @@ export interface SqliteDatabase {
 
 /**
  * Ouvre SQLite sur le runtime courant. Node d'abord (`node:sqlite`),
- * Bun ensuite (`bun:sqlite`) — zéro dépendance dans les deux cas.
+ * Bun ensuite (`bun:sqlite`) - zéro dépendance dans les deux cas.
  */
 export async function openSqliteDatabase(
 	path: string,

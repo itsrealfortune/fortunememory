@@ -6,13 +6,13 @@
  *   init   : decode PNG → payload JSON {version, memories} en mémoire
  *            (le vault est donc résident, décodé une fois)
  *   write  : mutation en RAM → re-encode PNG complet → write atomique
- *            (tmp + rename — crash-safe : on ne corrompt JAMAIS le PNG)
+ *            (tmp + rename - crash-safe : on ne corrompt JAMAIS le PNG)
  *
- * Format PNG = data/fortunememories.png — visuellement une image, contenu
+ * Format PNG = data/fortunememories.png - visuellement une image, contenu
  * = tout le vault (records + vecteurs). Désactivé par défaut:
  * proto provider = opt-in via FORTUNE_MEMORY_PROVIDER=roxify.
  *
- * Charge : roxify importé dynamiquement — a besoin que le paquet soit
+ * Charge : roxify importé dynamiquement - a besoin que le paquet soit
  * installé (postinstall télécharge le binaire Rust natif). Si absent, ce
  * provider seul échoue, le plugin entier reste sain.
  */

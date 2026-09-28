@@ -288,7 +288,7 @@ export default Plugin.define({
 				name: "fortune_find_conflicts",
 				description:
 					"Trouver les souvenirs actifs potentiellement en conflit avec une nouvelle info " +
-					"(fait, préférence, décision — 0-1, défaut 0.28) AVANT de la stocker. " +
+					"(fait, préférence, décision - 0-1, défaut 0.28) AVANT de la stocker. " +
 					"Un conflit retourné = redemande à l'utilisateur d'arbitrer avant d'écrire.",
 				input: {
 					type: "object",

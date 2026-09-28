@@ -177,7 +177,7 @@ jobs:
       - name: Verify lockfile consistency
         run: |
           bun install --frozen-lockfile 2>&1 || {
-            echo "❌ Lockfile out of date — run 'bun install' and commit the update"
+            echo "❌ Lockfile out of date - run 'bun install' and commit the update"
             exit 1
           }
           echo "✅ Lockfile is consistent"

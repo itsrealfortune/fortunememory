@@ -2,7 +2,7 @@
  * Encodage vectoriel local + providers embeddings (port de Open-Self
  * src/context/vectors.js + embeddings.js).
  *
- * `feature-hash` (défaut) : 100% local, déterministe, réseau zéro — tokens,
+ * `feature-hash` (défaut) : 100% local, déterministe, réseau zéro - tokens,
  * bigrammes, trigrammes de caractères vers un hash d'empreinte 256 dims.
  * `ollama` / `openai-compatible` : optionnels via FORTUNE_EMBEDDINGS.
  */

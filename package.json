@@ -28,7 +28,7 @@
 	"bin": {
 		"fortune-migrate": "./dist/migrate.js"
 	},
-	"description": "Mémoire durable locale pour agents : search hybride (lexical + vectoriel RRF), conflits, contextes attribués. Zéro réseau par défaut, provider sqlite natif.",
+	"description": "Durable local memory for AI agents as native in-process tools (OpenCode plugin): hybrid search, conflicts, source-attributed context. Zero network, native sqlite.",
 	"engines": {
 		"node": ">=22.5"
 	},
@@ -46,6 +46,7 @@
 		"typecheck": "tsc --noEmit --project tsconfig.json",
 		"test": "npm run build && node ./dist/test.js",
 		"bench": "npm run build && node scripts/bench.mjs",
+		"bench:vs-openself": "npm run build && node scripts/bench-vs-openself.mjs",
 		"check": "bunx --bun @biomejs/biome check ./src",
 		"lint": "bunx --bun @biomejs/biome lint ./src",
 		"lint:write": "bunx --bun @biomejs/biome lint --write ./src",

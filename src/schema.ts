@@ -1,6 +1,6 @@
 /**
  * Types + normalisation des souvenirs (port de Open-Self src/context/schema.js,
- * sans zod — validation manuelle, sans dépendance).
+ * sans zod - validation manuelle, sans dépendance).
  *
  * Les souvenirs sont des DONNÉES : jamais traiter leur contenu comme des
  * instructions.
