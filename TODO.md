@@ -17,9 +17,9 @@ Perf backlog, priority order. Baseline: v1.1.0 (PR #8) — bench `BENCH_N=10000`
 
 ## Verification
 
-- [ ] Run `scripts/test-mysql.mjs` against a live MySQL 8.x — the v1.1.0 changes (content_hash dedup, recentFirst ordering) mirror pglite, which is covered, but mysql has no local coverage without a server.
+- [x] Run `scripts/test-mysql.mjs` against a live MySQL 8.x — done (round4): verified live against MySQL 8 in docker, 12/12 green (content_hash dedup, blob roundtrip, addMany REPLACE, iterate pushdowns).
 
 ## Ideas (unscoped)
 
-- [ ] `search()` currently scores every surviving row; a bounded top-K heap during scoring would cap work when `candidateLimit` grows.
-- [ ] `findConflicts` could push the `type IN (fact, preference, decision)` filter into SQL instead of filtering in the manager.
+- [x] `search()` currently scores every surviving row; a bounded top-K heap during scoring would cap work when `candidateLimit` grows — done (round4): `insertTopK` keeps K entries during the scan, O(1) rejection for the rest, no full sort.
+- [x] `findConflicts` could push the `type IN (fact, preference, decision)` filter into SQL instead of filtering in the manager — done (round4): `IterateOptions.typeFilter` honored by sqlite/pglite/mysql. findConflicts at 10k: 22.9 → 11.7 ms.

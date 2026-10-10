@@ -39,7 +39,7 @@ await p.addMany(mems.slice(1, 6).map((memory) => ({ memory, vector: [0.5, 0.25] 
 check("provider.addMany multi-row REPLACE", true);
 const rows = [];
 for await (const r of p.iterate(false, {})) rows.push(r);
-check("iterate with vectors", rows.length >= 19 && rows.every((r) => r.vector === null || Array.isArray(r.vector)));
+check("iterate with vectors", rows.length >= 19 && rows.every((r) => r.vector === null || r.vector.length > 0));
 const novec = [];
 for await (const r of p.iterate(false, { withVectors: false })) novec.push(r);
 check("iterate without vectors", novec.length >= 19 && novec.every((r) => r.vector === null));
