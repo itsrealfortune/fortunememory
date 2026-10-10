@@ -26,6 +26,7 @@ import {
 } from "./schema.ts";
 import {
 	FeatureHashEncoder,
+	TinyLru,
 	cosineSimilarity,
 	dotProduct,
 	tokenize,
@@ -78,9 +79,9 @@ export interface ConflictCandidate {
 export class FortuneMemoryManager {
 	readonly provider: FortuneProvider;
 	readonly vectorProvider: VectorProvider;
-	/** Cache tokens lexicaux par id : évite re-tokenize à chaque search. */
-	private readonly lexicalCache = new Map<string, Set<string>>();
-	private static readonly LEXICAL_CACHE_LIMIT = 10_000;
+	/** Cache tokens lexicaux par id : évite re-tokenize à chaque search.
+	 * LRU plafonné (eviction du plus ancien, pas de clear() brutal). */
+	private readonly lexicalCache = new TinyLru<string, Set<string>>(10_000);
 
 	constructor(provider: FortuneProvider, vectors?: VectorProvider) {
 		this.provider = provider;
@@ -95,9 +96,6 @@ export class FortuneMemoryManager {
 					`${memory.content} ${memory.summary} ${memory.tags.join(" ")}`,
 				),
 			);
-			if (this.lexicalCache.size >= FortuneMemoryManager.LEXICAL_CACHE_LIMIT) {
-				this.lexicalCache.clear();
-			}
 			this.lexicalCache.set(memory.id, cached);
 		}
 		return cached;
@@ -573,7 +571,6 @@ const STOPWORDS = new Set([
 	"plus",
 	"moins",
 	"the",
-	"a",
 	"an",
 	"is",
 	"it",
@@ -588,7 +585,6 @@ const STOPWORDS = new Set([
 	"my",
 	"your",
 	"mes",
-	"elle",
 	"lui",
 	"quoi",
 	"comment",

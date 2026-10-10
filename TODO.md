@@ -11,9 +11,9 @@ Perf backlog, priority order. Baseline: v1.1.0 (PR #8) — bench `BENCH_N=10000`
 - [x] **Stream SQLite reads with `stmt.iterate()` instead of `.all()`** — done (round4): `IterateOptions.stream` opt-in, consumed by `list` (breaks at `limit`). Measured: iterate() costs +25% per row on full scans, so it is NOT the default — only early-exit consumers set it. List at 10k: 43.8 → 15.5 ms.
 - [x] **FTS5 for the lexical leg** — done (round4): optional `FortuneProvider.searchLexical()` (capability `lexicalSearch`), bm25 ranking + LIMIT + business filters in SQL, FTS maintained delete+insert with idempotent legacy backfill. `search-lexical` at 10k: 90.7 → 30.0 ms, ahead of openself's FTS5 (54 ms).
 - [x] **Diagnose the 2× list gap vs openself** — diagnosed and closed: the gap was eager materialization (`.all()` fetched all 10k rows before the `limit` break), not driver overhead nor column selection. Streaming fetch fixed it (43.8 → 15.5 ms); we now lead openself 1.47× on list.
-- [ ] LRU eviction instead of full `clear()` in `lexicalCache` (`src/manager.ts`) and `FEATURE_CACHE` (`src/vectors.ts`) — both currently drop everything at the limit.
-- [ ] Debounced/batched flush in `JsonProvider` — it rewrites the whole file on every `addMemory` (crash-safety vs throughput tradeoff, decide consciously).
-- [ ] Dedup `STOPWORDS` in `src/manager.ts` (`"a"` and `"elle"` appear twice).
+- [x] LRU eviction instead of full `clear()` in `lexicalCache` (`src/manager.ts`) and `FEATURE_CACHE` (`src/vectors.ts`) — done (round4): shared `TinyLru` in `vectors.ts`, eviction of the oldest entry, no more full-cache drop.
+- [x] Debounced/batched flush in `JsonProvider` — **decided against**: durability wins for a memory vault (a never-lost write is the point); a crash must not lose a memory already returned to the caller. Write-heavy use goes to sqlite, bulk import uses `addMany` (single flush). Rationale documented on `JsonProvider.flush()`.
+- [x] Dedup `STOPWORDS` in `src/manager.ts` — done (round4): second `"a"` and `"elle"` removed.
 
 ## Verification
 

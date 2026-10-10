@@ -61,6 +61,13 @@ export class JsonProvider implements FortuneProvider {
 		if (this.dirty) this.flush();
 	}
 
+	/**
+	 * Flush synchrone à chaque écriture (décision consciente, TODO round4) :
+	 * la durabilité prime sur le débit pour un vault de mémoires - un crash
+	 * ne doit jamais perdre un souvenir déjà retourné à l'appelant. Le
+	 * débit se règle au niveau provider (sqlite = défaut pour usage intensif,
+	 * addMany = un seul flush pour l'import).
+	 */
 	private flush(): void {
 		const payload: PersistedPayload = { version: 1, memories: this.rows };
 		const tmp = `${this.filePath}.tmp`;
