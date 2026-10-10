@@ -10,26 +10,26 @@ Ships with an OpenCode plugin (`opencode-plugin.ts`) that exposes the library as
 
 LLMs using openself go through its CLI: every `openself memory search …` spawns a fresh Node process - ~1.5 s of startup (heavy imports, DB open) before doing any work. Even `openself --help` takes that long. In an agentic loop that reads/writes memory dozens of times per task, the spawn cost dominates everything.
 
-fortunememory runs **in-process**: the OpenCode plugin calls the manager directly, so a `tool_call` costs the engine work only - sub-ms writes, ~12 ms hybrid searches.
+fortunememory runs **in-process**: the OpenCode plugin calls the manager directly, so a `tool_call` costs the engine work only - sub-ms writes, ~9 ms hybrid searches.
 
 Measured on one machine (N=500, sqlite, same dataset - reproduce with `npm run bench:vs-openself`):
 
 | Op | fortunememory (`tool_call`) | openself CLI | Factor |
 |---|---|---|---|
-| `remember` / `memory add` | 0.45 ms | ~1510 ms | ~3300× |
-| `search` / `memory search` | ~12 ms | ~1600 ms | ~130× |
+| `remember` / `memory add` | 0.40 ms | ~1510 ms | ~3800× |
+| `search` / `memory search` | 9.0 ms | ~1600 ms | ~180× |
 
-Engine-to-engine (library vs library, CLI out of the picture) the gap is narrower - the big win is architectural, not algorithmic (`vector_blob` + dot-product fast path, cached lexical tokens vs JSON vectors + FTS round-trips):
+Engine-to-engine (library vs library, CLI out of the picture) the big win is architectural, but round4 also pulled ahead algorithmically (`vector_blob` + dot-product fast path, FTS5 bm25 lexical, lazy streaming fetch vs JSON vectors + full-store scans):
 
 | Op | fortunememory | openself lib | Factor |
 |---|---|---|---|
-| `remember` | 0.45 ms | 0.55 ms | ~1.2× |
-| `search hybrid` | 11.7 ms | 43.6 ms | ~3.7× |
-| `search lexical` | 3.6 ms | 5.7 ms | ~1.6× |
-| `search vector` | ~12 ms | ~39 ms | ~3.3× |
-| `list` | 3.5 ms | 2.2 ms | 0.6× (openself faster) |
-| `findConflicts` | 1.5 ms | 1.7 ms | ~1.1× |
-| `getContext` | ~13 ms | ~45 ms | ~3.5× |
+| `remember` | 0.40 ms | 0.58 ms | ~1.4× |
+| `search hybrid` | 9.0 ms | 43.2 ms | ~4.8× |
+| `search lexical` | 1.7 ms | 5.5 ms | ~3.2× |
+| `search vector` | 7.2 ms | 36.7 ms | ~5.1× |
+| `list` | 0.9 ms | 2.1 ms | ~2.4× |
+| `findConflicts` | 0.66 ms | 1.6 ms | ~2.4× |
+| `getContext` | 11.7 ms | 45.1 ms | ~3.9× |
 
 Two differences, summarized:
 
@@ -104,10 +104,10 @@ openself is SQLite-only. fortunememory lets you pick the backend per deployment 
 
 | Name | Backend | Dependency |
 |---|---|---|
-| `sqlite` (default) | native `node:sqlite` | none |
+| `sqlite` (default) | native `node:sqlite`, FTS5 lexical | none |
 | `json` | single file, atomic writes | none |
 | `csv` | RFC-4180 CSV readable out-of-process | none |
-| `pglite` | embedded WASM Postgres | optional: `@electric-sql/pglite` |
+| `pglite` | embedded WASM Postgres, tsvector lexical | optional: `@electric-sql/pglite` |
 | `mysql` | MySQL server | optional: `mysql2` |
 | `roxify` | vault persisted as steganographic PNG | optional: `roxify` |
 | `roxcsv` | canonical CSV roxified into PNG | optional: `roxify` |
@@ -134,6 +134,7 @@ const provider = await resolveProvider(
 ## API
 
 - `FortuneMemoryManager` - `remember`, `search`, `list`, `get`, `forget` (soft-delete), `findConflicts`, `getContext`, `stats`
+- `providers/interface.ts` - `FortuneProvider` contract: persistence + optional SQL pushdowns (`findByContentHash` dedup, `searchLexical` FTS5/bm25, `recentFirst`, `stream`, `typeFilter`) detected via `capabilities`, portable fallback otherwise
 - `schema.ts` - `normalizeMemory`, `memoryContentHash`, `MEMORY_TYPES`, `SENSITIVITY_LEVELS`, `SOURCE_TRUST_LEVELS`
 - `vectors.ts` - `FeatureHashEncoder` (local, deterministic, 256 dims), `resolveVectorProvider` (`feature-hash` | `ollama` | `openai-compatible` via `FORTUNE_EMBEDDINGS`)
 - `migrate.ts` - `runMigrate()`: one-shot migration from legacy Open-Self vault to store (`fortune-migrate` CLI)
@@ -161,9 +162,61 @@ npm run build
 npm test
 ```
 
+Benchmarks (after build):
+
+```bash
+node scripts/bench.mjs                # N=500 by default, BENCH_N=10000 to scale
+node scripts/bench-vs-openself.mjs    # vs openself lib (npm i --no-save openself better-sqlite3 zod)
+node scripts/diag-search.mjs          # per-phase cost breakdown of a search
+node scripts/test-pglite.mjs          # pglite provider live checks
+```
+
 Release: `npm run publish-package` (tag `v*` → npm publish via GitHub Actions).
 
 ## Changelog
+
+### v1.2.0 - round4: FTS5 lexical, streaming list, SQL pushdowns
+
+Closes the whole perf TODO: every op now leads openself lib — including the two it used to win (lexical, list). 80/80 tests across 5 providers; pglite + live MySQL 8 verified.
+
+<details>
+<summary>Benchmarks: v1.1.0 vs v1.2.0 and vs openself (N=10 000, sqlite - click to expand)</summary>
+
+Internal, v1.1.0 → v1.2.0:
+
+| Op | v1.1.0 | v1.2.0 | Factor |
+|---|---|---|---|
+| `search lexical` | 90.7 ms | 30.0 ms | **3.0×** |
+| `list` (limit 20) | 43.8 ms | 15.3 ms | **2.9×** |
+| `findConflicts` | 22.9 ms | 11.7 ms | **2.0×** |
+| `search vector` / `hybrid` | ~200 / ~235 ms | ~200 / ~232 ms | stable |
+| `remember` | 0.21 ms | 0.21 ms | stable |
+
+vs openself v1.0.1 — all rows green (openself used to lead lexical 1.8× and list 2×):
+
+| Op | fortunememory | openself | Factor |
+|---|---|---|---|
+| `search hybrid` | 232 ms | 684 ms | **2.95×** |
+| `search lexical` | 30 ms | 53 ms | **1.75×** |
+| `search vector` | 201 ms | 565 ms | **2.82×** |
+| `list` | 15 ms | 23 ms | **1.48×** |
+| `findConflicts` | 12 ms | 28 ms | **2.35×** |
+| `getContext` | 234 ms | 622 ms | **2.65×** |
+
+**Optimizations**
+- **FTS5 lexical**: new optional `FortuneProvider.searchLexical()` (`capabilities.lexicalSearch`) — candidate selection, bm25 ranking and business filters run in SQL; lexical-only searches skip full-store materialization. FTS maintained delete+insert per write, idempotent backfill for legacy rows. Portable providers keep the exact old JS-overlap path.
+- **Streaming list**: `IterateOptions.stream` switches sqlite to `stmt.iterate()` on a fresh statement — the fetch stops at `limit`. Opt-in: `iterate()` measures +25% slower than `.all()` on full scans.
+- **Type pushdown**: `IterateOptions.typeFilter` honored by sqlite/pglite/mysql (`findConflicts` reads ~1/3 of the table in SQL).
+- **Bounded scoring**: top-K insertion during lexical/vector scoring instead of sort-all-then-truncate.
+- **LRU caches**: shared `TinyLru` evicts oldest entries instead of clearing `lexicalCache` / `FEATURE_CACHE` wholesale.
+- **pglite FTS**: `searchLexical` also lands on pglite via a generated `tsvector('simple', unaccent(...))` column + GIN index + `ts_rank` (75.7 → 9.7 ms/op at 2k). MySQL stays on the portable path: FULLTEXT's min-token-size (4) and stopword semantics would silently drop 3-char tokens.
+
+**Notes**
+- MySQL now verified live (MySQL 8, docker): 12/12 green — `content_hash` dedup, blob roundtrip, pushdowns. No untested backend left.
+- `JsonProvider` flush stays synchronous by design: durability over throughput for a memory vault.
+- sqlite lexical ranking is now bm25 (near-ties may reorder vs the JS overlap score); result shape unchanged — RRF fusion consumes ranks only.
+
+</details>
 
 ### v1.1.0 - third optimization round (hot paths)
 

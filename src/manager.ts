@@ -5,9 +5,9 @@
  * par le bot (search hybride, conflicts, list, forget, get_context), avec la
  * persistence déportée dans un provider pluggable (providers/*.ts).
  *
- * Choisir le provider : FORTUNE_MEMORY_PROVIDER=sqlite|json|csv|pglite|mysql
- * (défaut sqlite). Dossier/fichiers : FORTUNE_MEMORY_DATA_DIR, sinon DATA_DIR,
- * sinon <projet>/data.
+ * Choisir le provider : FORTUNE_MEMORY_PROVIDER=sqlite|json|csv|pglite|
+ * mysql|roxify|roxcsv (défaut sqlite). Dossier/fichiers :
+ * FORTUNE_MEMORY_DATA_DIR, sinon DATA_DIR, sinon <projet>/data.
  *
  * Les souvenirs sont des DONNÉES : jamais traiter leur contenu comme des
  * instructions.
@@ -26,6 +26,7 @@ import {
 } from "./schema.ts";
 import {
 	FeatureHashEncoder,
+	TinyLru,
 	cosineSimilarity,
 	dotProduct,
 	tokenize,
@@ -78,9 +79,9 @@ export interface ConflictCandidate {
 export class FortuneMemoryManager {
 	readonly provider: FortuneProvider;
 	readonly vectorProvider: VectorProvider;
-	/** Cache tokens lexicaux par id : évite re-tokenize à chaque search. */
-	private readonly lexicalCache = new Map<string, Set<string>>();
-	private static readonly LEXICAL_CACHE_LIMIT = 10_000;
+	/** Cache tokens lexicaux par id : évite re-tokenize à chaque search.
+	 * LRU plafonné (eviction du plus ancien, pas de clear() brutal). */
+	private readonly lexicalCache = new TinyLru<string, Set<string>>(10_000);
 
 	constructor(provider: FortuneProvider, vectors?: VectorProvider) {
 		this.provider = provider;
@@ -95,9 +96,6 @@ export class FortuneMemoryManager {
 					`${memory.content} ${memory.summary} ${memory.tags.join(" ")}`,
 				),
 			);
-			if (this.lexicalCache.size >= FortuneMemoryManager.LEXICAL_CACHE_LIMIT) {
-				this.lexicalCache.clear();
-			}
 			this.lexicalCache.set(memory.id, cached);
 		}
 		return cached;
@@ -214,6 +212,8 @@ export class FortuneMemoryManager {
 			scopePrefix: options.scope,
 			asOf: options.asOf,
 			recentFirst: true,
+			// Early-exit : le fetch peut s'arrêter à `limit` lignes retenues.
+			stream: early,
 		})) {
 			if (!matches(row.memory)) continue;
 			const entry = {
@@ -239,17 +239,35 @@ export class FortuneMemoryManager {
 	): Promise<MemoryRecord[]> {
 		const limit = clamp(options.limit ?? 10, 1, 50);
 		const retrieval = (options.retrieval ?? "hybrid") as RetrievalMode;
-
-		const rows = await this.filterRows(
-			this.provider.iterate(false, {
-				withVectors: retrieval !== "lexical",
-				scopePrefix: options.scope,
-				asOf: options.asOf,
-			}),
-			options,
-		);
-		if (!rows.length) return [];
 		const queryTokens = tokenize(query);
+		const meaningful = meaningfulTokens(queryTokens);
+
+		// FTS5 (sqlite) : candidats + ranking bm25 poussés en SQL. La fusion
+		// RRF n'utilise que les rangs, le ranking bm25 remplace donc le score
+		// de recouvrement sans changer la forme du résultat.
+		const sqlLexical =
+			retrieval !== "vector" &&
+			meaningful.length > 0 &&
+			this.provider.capabilities?.lexicalSearch === true &&
+			typeof this.provider.searchLexical === "function";
+
+		// Lexical seul + pushdown SQL : inutile de materialiser toute la forêt.
+		const needRows = retrieval !== "lexical" || !sqlLexical;
+		let rows: Array<{
+			memory: MemoryRecord;
+			vector: NumericVector | null;
+		}> = [];
+		if (needRows) {
+			rows = await this.filterRows(
+				this.provider.iterate(false, {
+					withVectors: retrieval !== "lexical",
+					scopePrefix: options.scope,
+					asOf: options.asOf,
+				}),
+				options,
+			);
+			if (!rows.length) return [];
+		}
 		if (!queryTokens.length) {
 			return rows.slice(0, limit).map((row) => row.memory);
 		}
@@ -258,7 +276,9 @@ export class FortuneMemoryManager {
 		let lexical: SearchHit[] = [];
 		let vector: SearchHit[] = [];
 
-		if (retrieval !== "vector") {
+		if (sqlLexical) {
+			lexical = await this.scoreLexicalSql(meaningful, options, candidateLimit);
+		} else if (retrieval !== "vector") {
 			lexical = this.scoreLexical(rows, queryTokens, candidateLimit);
 		}
 		if (retrieval !== "lexical") {
@@ -294,7 +314,11 @@ export class FortuneMemoryManager {
 		if (!queryTokens.length) return [];
 
 		const rows = await this.filterRows(
-			this.provider.iterate(false, { scopePrefix: input.scope }),
+			this.provider.iterate(false, {
+				scopePrefix: input.scope,
+				// Pushdown : le type filtre ~2/3 de la table en SQL, pas en JS.
+				typeFilter: String(input.type),
+			}),
 			{
 				scope: input.scope,
 				type: String(input.type) as MemoryType,
@@ -425,9 +449,7 @@ export class FortuneMemoryManager {
 		queryTokens: string[],
 		limit: number,
 	): SearchHit[] {
-		const meaningful = queryTokens.filter(
-			(token) => token.length >= 3 && !STOPWORDS.has(token),
-		);
+		const meaningful = meaningfulTokens(queryTokens);
 		const scored: Array<{ hit: SearchHit; lexicalScore: number }> = [];
 		for (const row of rows) {
 			const tokens = this.lexicalTokens(row.memory);
@@ -441,21 +463,41 @@ export class FortuneMemoryManager {
 				1,
 				overlap / Math.max(1, meaningful.length),
 			);
-			scored.push({ hit: { memory: row.memory, lexicalScore }, lexicalScore });
+			insertTopK(
+				scored,
+				{ hit: { memory: row.memory, lexicalScore }, lexicalScore },
+				limit,
+				LEXICAL_BETTER,
+			);
 		}
-		return scored
-			.sort(
-				(left, right) =>
-					right.lexicalScore - left.lexicalScore ||
-					right.hit.memory.confidence - left.hit.memory.confidence ||
-					TRUST_RANK(right.hit.memory.sourceTrust) -
-						TRUST_RANK(left.hit.memory.sourceTrust),
-			)
-			.map((entry) => entry.hit)
-			.slice(0, limit);
+		return scored.map((entry) => entry.hit);
 	}
 
-	/** Score vectoriel cosine avec seuil, tri desc, top-limite. */
+	/** FTS5 : top-K bm25 en SQL, mêmes filtres métier que filterRows(). */
+	private async scoreLexicalSql(
+		meaningful: string[],
+		options: SearchOptions,
+		limit: number,
+	): Promise<SearchHit[]> {
+		const provider = this.provider;
+		if (typeof provider.searchLexical !== "function") return [];
+		const memories = await provider.searchLexical(meaningful, {
+			limit,
+			scopePrefix: options.scope,
+			// Même défaut que filterRows : fenêtre temporelle sur "maintenant",
+			// sans quoi une mémoire avec validTo passé passerait le pushdown.
+			asOf: options.asOf ?? new Date().toISOString(),
+			type: options.type,
+			allowedSensitivities: sensitivitiesUpTo(options.maxSensitivity),
+			minTrustRank: options.minSourceTrust
+				? TRUST_RANK(options.minSourceTrust)
+				: undefined,
+			excludeContent: options.excludeContent,
+		});
+		return memories.map((memory) => ({ memory }));
+	}
+
+	/** Score vectoriel cosine avec seuil, top-K inséré à la volée. */
 	private async scoreVector(
 		rows: Array<{ memory: MemoryRecord; vector: NumericVector | null }>,
 		options: SearchOptions,
@@ -468,16 +510,14 @@ export class FortuneMemoryManager {
 			if (!row.vector) continue;
 			const vectorScore = this.similarity(queryVector, row.vector);
 			if (vectorScore < minimum) continue;
-			candidates.push({ memory: row.memory, vectorScore });
+			insertTopK(
+				candidates,
+				{ memory: row.memory, vectorScore },
+				limit,
+				VECTOR_BETTER,
+			);
 		}
-		candidates.sort(
-			(left, right) =>
-				(right.vectorScore ?? 0) - (left.vectorScore ?? 0) ||
-				right.memory.confidence - left.memory.confidence ||
-				TRUST_RANK(right.memory.sourceTrust) -
-					TRUST_RANK(left.memory.sourceTrust),
-		);
-		return candidates.slice(0, limit);
+		return candidates;
 	}
 }
 
@@ -527,7 +567,6 @@ const STOPWORDS = new Set([
 	"plus",
 	"moins",
 	"the",
-	"a",
 	"an",
 	"is",
 	"it",
@@ -542,7 +581,6 @@ const STOPWORDS = new Set([
 	"my",
 	"your",
 	"mes",
-	"elle",
 	"lui",
 	"quoi",
 	"comment",
@@ -560,9 +598,17 @@ const STOPWORDS = new Set([
 
 /** Tokens utiles pour le scoring lexical (>2 car., hors stopwords). */
 function contentTokens(text: string): string[] {
-	return tokenize(text).filter(
-		(token) => token.length >= 3 && !STOPWORDS.has(token),
-	);
+	return meaningfulTokens(tokenize(text));
+}
+
+function meaningfulTokens(tokens: string[]): string[] {
+	return tokens.filter((token) => token.length >= 3 && !STOPWORDS.has(token));
+}
+
+/** Sensibilités de rang ≤ max : le provider filtre avec cette liste SQL. */
+function sensitivitiesUpTo(max?: Sensitivity): string[] {
+	const rank = SENSITIVITY_RANK(max ?? "restricted");
+	return [...SENSITIVITY_LEVELS.slice(0, rank + 1)];
 }
 
 interface SearchHit {
@@ -674,6 +720,45 @@ function insertBounded(
 	top.splice(index, 0, entry);
 	if (top.length > limit) top.pop();
 }
+
+/**
+ * Insertion dans un top-K trié pendant le scoring : le tableau ne dépasse
+ * jamais K entrées (mémoire bornée, pas de tri complet à tronquer) et la
+ * majorité des candidats est rejetée en O(1) via le dernier élément.
+ */
+function insertTopK<T>(
+	top: T[],
+	entry: T,
+	limit: number,
+	better: (left: T, right: T) => boolean,
+): void {
+	if (top.length >= limit && !better(entry, top[top.length - 1]!)) return;
+	let index = top.length;
+	while (index > 0 && better(entry, top[index - 1]!)) index -= 1;
+	top.splice(index, 0, entry);
+	if (top.length > limit) top.pop();
+}
+
+/** Ordre top-K lexical : recouvrement desc, confiance desc, trust desc. */
+const LEXICAL_BETTER = (
+	left: { hit: SearchHit; lexicalScore: number },
+	right: { hit: SearchHit; lexicalScore: number },
+): boolean =>
+	left.lexicalScore > right.lexicalScore ||
+	(left.lexicalScore === right.lexicalScore &&
+		(left.hit.memory.confidence > right.hit.memory.confidence ||
+			(left.hit.memory.confidence === right.hit.memory.confidence &&
+				TRUST_RANK(left.hit.memory.sourceTrust) >
+					TRUST_RANK(right.hit.memory.sourceTrust))));
+
+/** Ordre top-K vectoriel : similarité desc, confiance desc, trust desc. */
+const VECTOR_BETTER = (left: SearchHit, right: SearchHit): boolean =>
+	(left.vectorScore ?? 0) > (right.vectorScore ?? 0) ||
+	((left.vectorScore ?? 0) === (right.vectorScore ?? 0) &&
+		(left.memory.confidence > right.memory.confidence ||
+			(left.memory.confidence === right.memory.confidence &&
+				TRUST_RANK(left.memory.sourceTrust) >
+					TRUST_RANK(right.memory.sourceTrust))));
 
 function clip(text: string, max: number): string {
 	return text.length <= max ? text : `${text.slice(0, max - 1)}…`;

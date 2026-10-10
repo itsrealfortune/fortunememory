@@ -1,10 +1,14 @@
 /**
  * Contrat commun à tous les stores FortuneMemory.
  *
- * Principe : le provider se contente de PERSISTER - les filtres (scope,
- * sensibilité, type, validité), le scoring (lexical, vectoriel, hybride RRF)
- * et le rangement vivent dans manager.ts. Volume visé : quelques milliers de
- * souvenirs → mais ces filtres restent corrects à toute échelle.
+ * Principe : le provider PERSISTE - les filtres (scope, sensibilité, type,
+ * validité), le scoring (lexical, vectoriel, hybride RRF) et le rangement
+ * vivent dans manager.ts. Les providers peuvent ensuite exposer des
+ * pushdowns optionnels (findByContentHash, searchLexical FTS5,
+ * recentFirst/stream/typeFilter) : le manager les détecte via les
+ * méthodes/capabilities et garde le chemin portable en repli. Volume visé :
+ * quelques dizaines de milliers de souvenirs, filtres corrects à toute
+ * échelle.
  */
 
 import type { MemoryRecord } from "../schema.ts";
@@ -20,6 +24,23 @@ export interface StoredRow {
 export interface ProviderCapabilities {
 	/** iterate() respecte IterateOptions.recentFirst (ordre garanti). */
 	recentFirst?: boolean;
+	/** searchLexical() poussé en SQL (FTS5) disponible. */
+	lexicalSearch?: boolean;
+}
+
+/** Options du search lexical poussé en SQL. Filtres déjà résolus par le
+ * manager (rangs de sensibilité/confiance → listes explicites). */
+export interface LexicalSearchOptions extends IterateOptions {
+	/** Top-K renvoyés, déjà triés (bm25 + tie-breaks) par le provider. */
+	limit: number;
+	/** Filtre type exact (poussé en SQL). */
+	type?: string;
+	/** Sensibilités autorisées (rang ≤ maxSensitivity, résolu par le manager). */
+	allowedSensitivities?: string[];
+	/** Rang minimal de confiance source (index dans SOURCE_TRUST_LEVELS). */
+	minTrustRank?: number;
+	/** Exclure ce contenu exact. */
+	excludeContent?: string;
 }
 
 export interface IterateOptions {
@@ -36,6 +57,13 @@ export interface IterateOptions {
 	 * peuvent pas garantir l'ordre ignorent l'option (le manager détecte
 	 * capabilities.recentFirst avant de s'y fier). */
 	recentFirst?: boolean;
+	/** Le consommateur peut interrompre l'itération tôt (break) : préférer le
+	 * fetch paresseux du driver (stmt.iterate) à .all(). Sans effet sur les
+	 * full scans - iterate() coûte plus cher par ligne que .all() quand tout
+	 * est consommé (mesuré : +25% sur search à 10k). */
+	stream?: boolean;
+	/** Filtre type exact (poussé en SQL quand possible ; le manager revérifie). */
+	typeFilter?: string;
 }
 
 export interface FortuneProvider {
@@ -65,6 +93,18 @@ export interface FortuneProvider {
 	 * iterate() (comportement historique, O(n)).
 	 */
 	findByContentHash?(hash: string, scope: string): Promise<MemoryRecord | null>;
+
+	/**
+	 * Recherche lexical poussée en SQL (FTS5) : tokens déjà filtrés par le
+	 * manager (stopwords, longueur), résultats triés bm25 + tie-breaks.
+	 * Ranking voisin du chemin portable mais pas strictement identique
+	 * (bm25 vs recouvrement de tokens) - la fusion RRF n'utilise que les
+	 * rangs, donc interchangeable.
+	 */
+	searchLexical?(
+		tokens: string[],
+		opts: LexicalSearchOptions,
+	): Promise<MemoryRecord[]>;
 
 	/** Soft-delete : status=forgotten + forgottenAt. Retourne false si id inconnu. */
 	updateStatus(

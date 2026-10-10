@@ -144,14 +144,49 @@ export function cosineSimilarity(
 	return denominator ? dot / denominator : 0;
 }
 
-const FEATURE_CACHE = new Map<string, number>();
-const FEATURE_CACHE_LIMIT = 20_000;
+/**
+ * LRU minimal (Map insertion-ordered) : plafonne la mémoire des caches sans
+ * le clear() brutal qui jetait 10k entrées d'un coup et forçait un
+ * re-encodage complet du vault suivant.
+ */
+export class TinyLru<K, V> {
+	readonly limit: number;
+	private readonly map = new Map<K, V>();
+
+	constructor(limit: number) {
+		this.limit = Math.max(1, limit);
+	}
+
+	get(key: K): V | undefined {
+		const value = this.map.get(key);
+		if (value === undefined) return undefined;
+		// Rafraîchit la position (Map préserve l'ordre d'insertion).
+		this.map.delete(key);
+		this.map.set(key, value);
+		return value;
+	}
+
+	set(key: K, value: V): void {
+		this.map.delete(key);
+		this.map.set(key, value);
+		while (this.map.size > this.limit) {
+			const oldest = this.map.keys().next();
+			if (oldest.done) break;
+			this.map.delete(oldest.value);
+		}
+	}
+
+	delete(key: K): void {
+		this.map.delete(key);
+	}
+}
+
+const FEATURE_CACHE = new TinyLru<string, number>(20_000);
 
 function addFeature(vector: number[], feature: string, weight: number): void {
 	let hash = FEATURE_CACHE.get(feature);
 	if (hash === undefined) {
 		hash = hashFeature(feature);
-		if (FEATURE_CACHE.size >= FEATURE_CACHE_LIMIT) FEATURE_CACHE.clear();
 		FEATURE_CACHE.set(feature, hash);
 	}
 	const index = (hash >>> 1) % vector.length;

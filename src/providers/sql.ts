@@ -1,12 +1,16 @@
 /**
  * Providers SQL serveur/embedded : PGLite (Postgres embarqué WASM) et MySQL.
  *
- * Utilisent le même dialecte avec paramètrescala $1/$? et lazily importés :
+ * Utilisent le même dialecte avec paramètres $1/$? et lazily importés :
  * si le paquet n'est pas installé, seul ce provider échoue (pas le plugin
  * entier). Schemas identiques à sqlite.ts (colonnes renommées à la main).
  */
 
-import { memoryContentHash, type MemoryRecord } from "../schema.ts";
+import {
+	SOURCE_TRUST_LEVELS,
+	memoryContentHash,
+	type MemoryRecord,
+} from "../schema.ts";
 import {
 	encodeVectorBlob,
 	parseVectorBlob,
@@ -15,6 +19,7 @@ import {
 import type {
 	FortuneProvider,
 	IterateOptions,
+	LexicalSearchOptions,
 	ProviderCapabilities,
 	StoredRow,
 } from "./interface.ts";
@@ -54,6 +59,40 @@ const ORDER_CREATED_DESC = "ORDER BY created_at DESC";
  * = chronologique. */
 const ORDER_RECENT_DESC =
 	"ORDER BY COALESCE(occurred_at, valid_from, created_at) DESC";
+
+/** Colonnes light : ni vecteur ni blob (chemins lexical/list/dedup). */
+const PG_SELECT_COLUMNS = COLUMNS.filter(
+	(column) => column !== "vector" && column !== "vector_blob",
+).join(", ");
+
+/**
+ * unaccent (contrib pglite) + wrapper IMMUTABLE : requis par la colonne
+ * générée tsv - la config 'simple' ne stripe pas les diacritiques et on
+ * veut que "cafe" matche "café" (comme le FTS5 unicode61 de sqlite).
+ */
+const PG_UNACCENT = `
+  CREATE EXTENSION IF NOT EXISTS unaccent;
+  CREATE OR REPLACE FUNCTION fortune_unaccent(text) RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $fn$ SELECT unaccent('unaccent'::regdictionary, $1) $fn$;
+`;
+
+/** Expression de la colonne générée tsv (figée à la création de la colonne). */
+function tsvExpression(useUnaccent: boolean): string {
+	const text =
+		"coalesce(content, '') || ' ' || coalesce(summary, '') || ' ' || coalesce(tags, '')";
+	return useUnaccent
+		? `to_tsvector('simple', fortune_unaccent(${text}))`
+		: `to_tsvector('simple', ${text})`;
+}
+
+/** Tokens → requête websearch : tokens entre quotes simples, joints OR. */
+function ftsPgQuery(tokens: string[]): string | null {
+	const quoted = tokens
+		.filter(Boolean)
+		.map((token) => `'${token.replace(/'/g, "''")}'`);
+	return quoted.length ? quoted.join(" OR ") : null;
+}
 const CREATE_TABLE_POSTGRES = `
   CREATE TABLE IF NOT EXISTS fortune_memories (
     id TEXT PRIMARY KEY,
@@ -112,7 +151,10 @@ const CREATE_TABLE_MYSQL = `
 
 export class PgliteProvider implements FortuneProvider {
 	readonly name = "pglite";
-	readonly capabilities: ProviderCapabilities = { recentFirst: true };
+	readonly capabilities: ProviderCapabilities = {
+		recentFirst: true,
+		lexicalSearch: true,
+	};
 	private client: Awaited<ReturnType<typeof importPGlite>> | null = null;
 	private readonly config: { dataDir?: string };
 
@@ -133,6 +175,15 @@ export class PgliteProvider implements FortuneProvider {
 
 	async init(): Promise<void> {
 		this.client = await importPGlite(this.config.dataDir);
+		// unaccent : fonction IMMUTABLE requise par la colonne générée tsv
+		// (best-effort : sans l'extension, le tsv reste sensible aux accents).
+		let unaccentReady = false;
+		try {
+			await this.client.exec(PG_UNACCENT);
+			unaccentReady = true;
+		} catch {
+			// unaccent absent de ce build pglite.
+		}
 		await this.client.exec(CREATE_TABLE_POSTGRES);
 		try {
 			await this.client.exec(
@@ -147,6 +198,22 @@ export class PgliteProvider implements FortuneProvider {
 			);
 		} catch {
 			// Déjà présente.
+		}
+		// tsv (colonnes générées stockées) : recalculé par PG pour les lignes
+		// legacy à l'ALTER ; l'expression est figée à la création de colonne.
+		try {
+			await this.client.exec(
+				`ALTER TABLE fortune_memories ADD COLUMN IF NOT EXISTS tsv tsvector GENERATED ALWAYS AS (${tsvExpression(unaccentReady)}) STORED`,
+			);
+		} catch {
+			// Colonne déjà présente.
+		}
+		try {
+			await this.client.exec(
+				"CREATE INDEX IF NOT EXISTS fortune_memories_tsv_idx ON fortune_memories USING GIN (tsv)",
+			);
+		} catch {
+			// Index déjà présent.
 		}
 		// Index dédup (après ALTER : les bases legacy n'avaient pas la colonne).
 		try {
@@ -272,6 +339,70 @@ export class PgliteProvider implements FortuneProvider {
 		return row ? rowToMemory(row as never) : null;
 	}
 
+	/**
+	 * Lexical poussé en SQL : colonne générée tsvector('simple',
+	 * unaccent(...)) indexée GIN, ranking ts_rank. Config 'simple' = tokens
+	 * exacts sans stemming, même philosophie que le FTS5 unicode61 de sqlite.
+	 * Mêmes filtres métier que filterRows(), traduits en SQL.
+	 */
+	async searchLexical(
+		tokens: string[],
+		opts: LexicalSearchOptions,
+	): Promise<MemoryRecord[]> {
+		const tsquery = ftsPgQuery(tokens);
+		if (!tsquery) return [];
+		const client = await this.require();
+		const conditions = [
+			"tsv @@ (SELECT websearch_to_tsquery('simple', $1))",
+			"status='active'",
+		];
+		const params: unknown[] = [tsquery];
+		const push = (value: unknown): string => {
+			params.push(value);
+			return `$${params.length}`;
+		};
+		if (opts.scopePrefix) {
+			conditions.push(
+				`(scope = ${push(opts.scopePrefix)} OR scope LIKE ${push(`${opts.scopePrefix}/%`)})`,
+			);
+		}
+		if (opts.asOf) {
+			conditions.push(
+				`(valid_from IS NULL OR valid_from <= ${push(opts.asOf)})`,
+				`(valid_to IS NULL OR valid_to >= ${push(opts.asOf)})`,
+			);
+		}
+		if (opts.type) {
+			conditions.push(`type = ${push(opts.type)}`);
+		}
+		if (opts.allowedSensitivities) {
+			if (!opts.allowedSensitivities.length) return [];
+			conditions.push(
+				`sensitivity IN (${opts.allowedSensitivities.map((value) => push(value)).join(", ")})`,
+			);
+		}
+		if (opts.minTrustRank !== undefined) {
+			const allowed = SOURCE_TRUST_LEVELS.filter(
+				(_, index) => index >= (opts.minTrustRank ?? 0),
+			);
+			if (!allowed.length) return [];
+			conditions.push(
+				`source_trust IN (${allowed.map((value) => push(value)).join(", ")})`,
+			);
+		}
+		if (opts.excludeContent) {
+			conditions.push(`content != ${push(opts.excludeContent)}`);
+		}
+		const result = await client.query(
+			`SELECT ${PG_SELECT_COLUMNS} FROM fortune_memories
+			 WHERE ${conditions.join(" AND ")}
+			 ORDER BY ts_rank(tsv, (SELECT websearch_to_tsquery('simple', $1))) DESC, confidence DESC
+			 LIMIT ${push(opts.limit)}`,
+			params,
+		);
+		return (result.rows ?? []).map((row) => rowToMemory(row as never));
+	}
+
 	async getMemory(
 		id: string,
 		includeForgotten = false,
@@ -292,12 +423,7 @@ export class PgliteProvider implements FortuneProvider {
 		opts: IterateOptions = {},
 	): AsyncIterable<StoredRow> {
 		const client = await this.require();
-		const columns =
-			opts.withVectors === false
-				? COLUMNS.filter(
-						(column) => column !== "vector" && column !== "vector_blob",
-					).join(", ")
-				: "*";
+		const columns = opts.withVectors === false ? PG_SELECT_COLUMNS : "*";
 		const conditions: string[] = [];
 		const params: unknown[] = [];
 		if (!includeForgotten) conditions.push("status='active'");
@@ -306,6 +432,10 @@ export class PgliteProvider implements FortuneProvider {
 				`(scope=$${params.length + 1} OR scope LIKE $${params.length + 2})`,
 			);
 			params.push(opts.scopePrefix, `${opts.scopePrefix}/%`);
+		}
+		if (opts.typeFilter) {
+			conditions.push(`type=$${params.length + 1}`);
+			params.push(opts.typeFilter);
 		}
 		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 		const order = opts.recentFirst ? ORDER_RECENT_DESC : ORDER_CREATED_DESC;
@@ -357,7 +487,19 @@ async function importPGlite(dataDir?: string | undefined): Promise<{
 				"(npm install @electric-sql/pglite)",
 		);
 	}
-	const client = new mod.PGlite(dataDir);
+	// unaccent (contrib) : tsv insensible aux accents. Optionnel au chargement,
+	// dégradation documentée : sans lui le tsv matche "café" mais pas "cafe".
+	const extensions: Record<string, unknown> = {};
+	try {
+		const specifier = "@electric-sql/pglite/contrib/unaccent";
+		const contrib = (await import(specifier)) as { unaccent?: unknown };
+		if (contrib.unaccent) extensions.unaccent = contrib.unaccent;
+	} catch {
+		// Contrib absent de ce build.
+	}
+	const client = new mod.PGlite(dataDir, {
+		extensions: extensions as never,
+	});
 	return client as unknown as {
 		exec(sql: string): Promise<void>;
 		query<T = Record<string, unknown>>(
@@ -577,6 +719,10 @@ export class MysqlProvider implements FortuneProvider {
 				"(valid_to IS NULL OR valid_to >= ?)",
 			);
 			params.push(opts.asOf, opts.asOf);
+		}
+		if (opts.typeFilter) {
+			conditions.push("type=?");
+			params.push(opts.typeFilter);
 		}
 		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 		const order = opts.recentFirst ? ORDER_RECENT_DESC : ORDER_CREATED_DESC;

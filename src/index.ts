@@ -46,6 +46,7 @@ export type { NumericVector, VectorProvider } from "./vectors.ts";
 export type {
 	FortuneProvider,
 	IterateOptions,
+	LexicalSearchOptions,
 	ProviderCapabilities,
 	StoredRow,
 } from "./providers/interface.ts";

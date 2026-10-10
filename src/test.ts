@@ -43,12 +43,16 @@ function autoInit(provider: FortuneProvider): FortuneProvider {
 		})();
 
 	const findByContentHash = provider.findByContentHash?.bind(provider);
+	const searchLexical = provider.searchLexical?.bind(provider);
 
 	return {
 		name: provider.name,
 		capabilities: provider.capabilities,
 		findByContentHash: findByContentHash
 			? (hash, scope) => queue(() => findByContentHash(hash, scope))
+			: undefined,
+		searchLexical: searchLexical
+			? (tokens, opts) => queue(() => searchLexical(tokens, opts))
 			: undefined,
 		init: () => queue(() => provider.init()),
 		close: () => queue(() => provider.close()),
@@ -204,6 +208,23 @@ async function runSuite(
 		check(
 			"list ordonne récent → ancien (occurredAt)",
 			recent[0]?.content === "événement récent",
+		);
+
+		// Fenêtre de validité expirée : exclue en lexical FTS comme en portable
+		// (le pushdown reçoit asOf = maintenant par défaut).
+		await manager.remember({
+			content: "offre expiree xyz",
+			type: "note",
+			scope: "discord/dm/42",
+			validFrom: "2000-01-01T00:00:00.000Z",
+			validTo: "2001-01-01T00:00:00.000Z",
+		});
+		const expired = await manager.search("expiree xyz", {
+			retrieval: "lexical",
+		});
+		check(
+			"search lexical exclut les fenêtres expirées",
+			!expired.some((m) => m.content.includes("offre expiree")),
 		);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });

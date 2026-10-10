@@ -27,6 +27,14 @@ const check = (name, cond) => {
   check("search hybrid >0", hits.length > 0);
   const lex = await m.search("database pricing", { limit: 5, retrieval: "lexical" });
   check("search lexical >0", lex.length > 0);
+  // tsvector lexical : accents insensibles (unaccent) + requête directe
+  await m.remember({ content: "réunion café lundi", type: "fact", scope: "pg/s1" });
+  const accented = await m.search("cafe", { retrieval: "lexical", limit: 5 });
+  check("tsvector matches accents (cafe→café)", accented.some((x) => x.content.includes("café")));
+  const direct = await p.searchLexical(["pricing"], { limit: 5 });
+  check("provider searchLexical direct", direct.length > 0);
+  const nomatch = await p.searchLexical(["elephantbleu"], { limit: 5 });
+  check("searchLexical no-match", nomatch.length === 0);
   const scoped = await m.list({ scope: "pg/s0", limit: 20 });
   check("list scope", scoped.length > 0 && scoped.every((x) => x.scope.startsWith("pg/s0")));
   const c = await m.findConflicts({ content: "pglite memory database pricing decision", type: "fact", scope: "pg/s1" });
