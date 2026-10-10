@@ -241,17 +241,35 @@ export class FortuneMemoryManager {
 	): Promise<MemoryRecord[]> {
 		const limit = clamp(options.limit ?? 10, 1, 50);
 		const retrieval = (options.retrieval ?? "hybrid") as RetrievalMode;
-
-		const rows = await this.filterRows(
-			this.provider.iterate(false, {
-				withVectors: retrieval !== "lexical",
-				scopePrefix: options.scope,
-				asOf: options.asOf,
-			}),
-			options,
-		);
-		if (!rows.length) return [];
 		const queryTokens = tokenize(query);
+		const meaningful = meaningfulTokens(queryTokens);
+
+		// FTS5 (sqlite) : candidats + ranking bm25 poussés en SQL. La fusion
+		// RRF n'utilise que les rangs, le ranking bm25 remplace donc le score
+		// de recouvrement sans changer la forme du résultat.
+		const sqlLexical =
+			retrieval !== "vector" &&
+			meaningful.length > 0 &&
+			this.provider.capabilities?.lexicalSearch === true &&
+			typeof this.provider.searchLexical === "function";
+
+		// Lexical seul + pushdown SQL : inutile de materialiser toute la forêt.
+		const needRows = retrieval !== "lexical" || !sqlLexical;
+		let rows: Array<{
+			memory: MemoryRecord;
+			vector: NumericVector | null;
+		}> = [];
+		if (needRows) {
+			rows = await this.filterRows(
+				this.provider.iterate(false, {
+					withVectors: retrieval !== "lexical",
+					scopePrefix: options.scope,
+					asOf: options.asOf,
+				}),
+				options,
+			);
+			if (!rows.length) return [];
+		}
 		if (!queryTokens.length) {
 			return rows.slice(0, limit).map((row) => row.memory);
 		}
@@ -260,7 +278,13 @@ export class FortuneMemoryManager {
 		let lexical: SearchHit[] = [];
 		let vector: SearchHit[] = [];
 
-		if (retrieval !== "vector") {
+		if (sqlLexical) {
+			lexical = await this.scoreLexicalSql(
+				meaningful,
+				options,
+				candidateLimit,
+			);
+		} else if (retrieval !== "vector") {
 			lexical = this.scoreLexical(rows, queryTokens, candidateLimit);
 		}
 		if (retrieval !== "lexical") {
@@ -427,9 +451,7 @@ export class FortuneMemoryManager {
 		queryTokens: string[],
 		limit: number,
 	): SearchHit[] {
-		const meaningful = queryTokens.filter(
-			(token) => token.length >= 3 && !STOPWORDS.has(token),
-		);
+		const meaningful = meaningfulTokens(queryTokens);
 		const scored: Array<{ hit: SearchHit; lexicalScore: number }> = [];
 		for (const row of rows) {
 			const tokens = this.lexicalTokens(row.memory);
@@ -455,6 +477,28 @@ export class FortuneMemoryManager {
 			)
 			.map((entry) => entry.hit)
 			.slice(0, limit);
+	}
+
+	/** FTS5 : top-K bm25 en SQL, mêmes filtres métier que filterRows(). */
+	private async scoreLexicalSql(
+		meaningful: string[],
+		options: SearchOptions,
+		limit: number,
+	): Promise<SearchHit[]> {
+		const provider = this.provider;
+		if (typeof provider.searchLexical !== "function") return [];
+		const memories = await provider.searchLexical(meaningful, {
+			limit,
+			scopePrefix: options.scope,
+			asOf: options.asOf,
+			type: options.type,
+			allowedSensitivities: sensitivitiesUpTo(options.maxSensitivity),
+			minTrustRank: options.minSourceTrust
+				? TRUST_RANK(options.minSourceTrust)
+				: undefined,
+			excludeContent: options.excludeContent,
+		});
+		return memories.map((memory) => ({ memory }));
 	}
 
 	/** Score vectoriel cosine avec seuil, tri desc, top-limite. */
@@ -562,9 +606,17 @@ const STOPWORDS = new Set([
 
 /** Tokens utiles pour le scoring lexical (>2 car., hors stopwords). */
 function contentTokens(text: string): string[] {
-	return tokenize(text).filter(
-		(token) => token.length >= 3 && !STOPWORDS.has(token),
-	);
+	return meaningfulTokens(tokenize(text));
+}
+
+function meaningfulTokens(tokens: string[]): string[] {
+	return tokens.filter((token) => token.length >= 3 && !STOPWORDS.has(token));
+}
+
+/** Sensibilités de rang ≤ max : le provider filtre avec cette liste SQL. */
+function sensitivitiesUpTo(max?: Sensitivity): string[] {
+	const rank = SENSITIVITY_RANK(max ?? "restricted");
+	return [...SENSITIVITY_LEVELS.slice(0, rank + 1)];
 }
 
 interface SearchHit {

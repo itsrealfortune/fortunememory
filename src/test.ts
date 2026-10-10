@@ -43,12 +43,16 @@ function autoInit(provider: FortuneProvider): FortuneProvider {
 		})();
 
 	const findByContentHash = provider.findByContentHash?.bind(provider);
+	const searchLexical = provider.searchLexical?.bind(provider);
 
 	return {
 		name: provider.name,
 		capabilities: provider.capabilities,
 		findByContentHash: findByContentHash
 			? (hash, scope) => queue(() => findByContentHash(hash, scope))
+			: undefined,
+		searchLexical: searchLexical
+			? (tokens, opts) => queue(() => searchLexical(tokens, opts))
 			: undefined,
 		init: () => queue(() => provider.init()),
 		close: () => queue(() => provider.close()),

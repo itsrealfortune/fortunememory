@@ -20,6 +20,23 @@ export interface StoredRow {
 export interface ProviderCapabilities {
 	/** iterate() respecte IterateOptions.recentFirst (ordre garanti). */
 	recentFirst?: boolean;
+	/** searchLexical() poussé en SQL (FTS5) disponible. */
+	lexicalSearch?: boolean;
+}
+
+/** Options du search lexical poussé en SQL. Filtres déjà résolus par le
+ * manager (rangs de sensibilité/confiance → listes explicites). */
+export interface LexicalSearchOptions extends IterateOptions {
+	/** Top-K renvoyés, déjà triés (bm25 + tie-breaks) par le provider. */
+	limit: number;
+	/** Filtre type exact (poussé en SQL). */
+	type?: string;
+	/** Sensibilités autorisées (rang ≤ maxSensitivity, résolu par le manager). */
+	allowedSensitivities?: string[];
+	/** Rang minimal de confiance source (index dans SOURCE_TRUST_LEVELS). */
+	minTrustRank?: number;
+	/** Exclure ce contenu exact. */
+	excludeContent?: string;
 }
 
 export interface IterateOptions {
@@ -70,6 +87,18 @@ export interface FortuneProvider {
 	 * iterate() (comportement historique, O(n)).
 	 */
 	findByContentHash?(hash: string, scope: string): Promise<MemoryRecord | null>;
+
+	/**
+	 * Recherche lexical poussée en SQL (FTS5) : tokens déjà filtrés par le
+	 * manager (stopwords, longueur), résultats triés bm25 + tie-breaks.
+	 * Ranking voisin du chemin portable mais pas strictement identique
+	 * (bm25 vs recouvrement de tokens) - la fusion RRF n'utilise que les
+	 * rangs, donc interchangeable.
+	 */
+	searchLexical?(
+		tokens: string[],
+		opts: LexicalSearchOptions,
+	): Promise<MemoryRecord[]>;
 
 	/** Soft-delete : status=forgotten + forgottenAt. Retourne false si id inconnu. */
 	updateStatus(

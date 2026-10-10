@@ -11,10 +11,15 @@
 
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { memoryContentHash, type MemoryRecord } from "../schema.ts";
+import {
+	SOURCE_TRUST_LEVELS,
+	memoryContentHash,
+	type MemoryRecord,
+} from "../schema.ts";
 import type {
 	FortuneProvider,
 	IterateOptions,
+	LexicalSearchOptions,
 	ProviderCapabilities,
 	StoredRow,
 } from "./interface.ts";
@@ -190,12 +195,28 @@ const SCHEMA = `
     ON fortune_memories(scope, status);
   CREATE INDEX IF NOT EXISTS fortune_memories_content_hash
     ON fortune_memories(content_hash, scope);
+  CREATE VIRTUAL TABLE IF NOT EXISTS fortune_memories_fts USING fts5(
+    id UNINDEXED, content, summary, tags
+  );
 `;
 
 const MIGRATE_CONTENT_HASH =
 	"ALTER TABLE fortune_memories ADD COLUMN content_hash TEXT";
 const MIGRATE_VECTOR_BLOB =
 	"ALTER TABLE fortune_memories ADD COLUMN vector_blob BLOB";
+
+/** Maintenance de l'index FTS (standalone : delete+insert par écriture). */
+const FTS_DELETE = "DELETE FROM fortune_memories_fts WHERE id = $id";
+const FTS_INSERT = `
+  INSERT INTO fortune_memories_fts (id, content, summary, tags)
+  VALUES ($id, $content, $summary, $tags)
+`;
+/** Backfill idempotent : les lignes legacy absentes de l'index. */
+const FTS_BACKFILL = `
+  INSERT INTO fortune_memories_fts (id, content, summary, tags)
+  SELECT id, content, summary, tags FROM fortune_memories
+  WHERE id NOT IN (SELECT id FROM fortune_memories_fts)
+`;
 
 const INSERT = `
   INSERT INTO fortune_memories (
@@ -220,6 +241,10 @@ const INSERT = `
 const LIGHT_COLUMNS =
 	"id, type, content, summary, source_kind, source_locator, source_title, scope, sensitivity, source_trust, confidence, valid_from, valid_to, occurred_at, tags, status, created_at, updated_at, forgotten_at, content_hash";
 const FULL_COLUMNS = "*, vector AS vector_raw, vector_blob AS vector_blob_raw";
+/** LIGHT_COLUMNS qualifié pour le JOIN avec la table FTS (colonnes homonymes). */
+const FTS_LIGHT_COLUMNS = LIGHT_COLUMNS.split(", ")
+	.map((column) => `m.${column}`)
+	.join(", ");
 const ORDER_CREATED_DESC = "ORDER BY created_at DESC";
 /** Tri récent poussé en SQL : les dates sont normalisées UTC à l'écriture,
  * l'ordre lexicographique vaut chronologique. */
@@ -230,10 +255,38 @@ function escapeLike(value: string): string {
 	return value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
 
+/** Tokens → requête FTS5 : chaque token entre guillemets (phrase), joints OR.
+ * Les tokens arrivent déjà filtrés par le manager (stopwords, longueur). */
+function ftsMatchQuery(tokens: string[]): string | null {
+	const quoted = tokens
+		.filter(Boolean)
+		.map((token) => `"${token.replace(/"/g, '""')}"`);
+	return quoted.length ? quoted.join(" OR ") : null;
+}
+
+/** Clause IN paramétrée ($prefix0, $prefix1, ...). */
+function pushInClause(
+	conditions: string[],
+	params: SqliteParams,
+	column: string,
+	prefix: string,
+	values: readonly string[],
+): void {
+	const names = values.map((value, index) => {
+		const key = `${prefix}${index}`;
+		params[key] = value;
+		return key;
+	});
+	conditions.push(`${column} IN (${names.join(", ")})`);
+}
+
 export class SqliteProvider implements FortuneProvider {
 	readonly name = "sqlite";
 	/** Tri récent → ancien poussé en SQL (COALESCE sur les dates normalisées). */
-	readonly capabilities: ProviderCapabilities = { recentFirst: true };
+	readonly capabilities: ProviderCapabilities = {
+		recentFirst: true,
+		lexicalSearch: true,
+	};
 	private readonly dbPath: string;
 	private db: SqliteDatabase | null = null;
 	private statements = new Map<string, SqliteStatement>();
@@ -313,6 +366,9 @@ export class SqliteProvider implements FortuneProvider {
 				});
 			}
 		}
+		// Backfill FTS : une passe idempotente pour les lignes legacy (et un
+		// éventuel crash au milieu d'un backfill précédent).
+		this.db.exec(FTS_BACKFILL);
 	}
 
 	async close(): Promise<void> {
@@ -358,6 +414,7 @@ export class SqliteProvider implements FortuneProvider {
 		memory.contentHash =
 			memory.contentHash ?? memoryContentHash(memory.content);
 		this.statement(INSERT).run(this.memoryToParams(memory, vector));
+		this.syncFts(memory);
 	}
 
 	async addMany(
@@ -372,6 +429,7 @@ export class SqliteProvider implements FortuneProvider {
 				entry.memory.contentHash =
 					entry.memory.contentHash ?? memoryContentHash(entry.memory.content);
 				insert.run(this.memoryToParams(entry.memory, entry.vector));
+				this.syncFts(entry.memory);
 			}
 			db.exec("COMMIT;");
 		} catch (error) {
@@ -382,6 +440,18 @@ export class SqliteProvider implements FortuneProvider {
 			}
 			throw error;
 		}
+	}
+
+	/** Index FTS tenu à jour à chaque écriture (delete+insert, upsert-safe). */
+	private syncFts(memory: MemoryRecord): void {
+		// node:sqlite refuse les paramètres inutilisés : deux bindings distincts.
+		this.statement(FTS_DELETE).run({ $id: memory.id });
+		this.statement(FTS_INSERT).run({
+			$id: memory.id,
+			$content: memory.content,
+			$summary: memory.summary,
+			$tags: memory.tags.join(" "),
+		});
 	}
 
 	async updateStatus(
@@ -484,6 +554,70 @@ export class SqliteProvider implements FortuneProvider {
 			$scope_prefix: `${escapeLike(scope)}/%`,
 		});
 		return row ? rowToMemory(row) : null;
+	}
+
+	/**
+	 * FTS5 : candidats + ranking poussés en SQL (bm25 pondéré content 1.0,
+	 * summary 0.5, tags 0.2 ; tie-break confiance desc). Mêmes filtres métier
+	 * que filterRows(), traduits en SQL ici.
+	 */
+	async searchLexical(
+		tokens: string[],
+		opts: LexicalSearchOptions,
+	): Promise<MemoryRecord[]> {
+		const match = ftsMatchQuery(tokens);
+		if (!match) return [];
+		const conditions = [
+			"fortune_memories_fts MATCH $match",
+			"m.status = 'active'",
+		];
+		const params: SqliteParams = { $match: match, $limit: opts.limit };
+		if (opts.scopePrefix) {
+			conditions.push(
+				"(m.scope = $scope OR m.scope LIKE $scope_prefix ESCAPE '\\')",
+			);
+			params.$scope = opts.scopePrefix;
+			params.$scope_prefix = `${escapeLike(opts.scopePrefix)}/%`;
+		}
+		if (opts.asOf) {
+			conditions.push(
+				"(m.valid_from IS NULL OR m.valid_from <= $asof)",
+				"(m.valid_to IS NULL OR m.valid_to >= $asof)",
+			);
+			params.$asof = opts.asOf;
+		}
+		if (opts.type) {
+			conditions.push("m.type = $type");
+			params.$type = opts.type;
+		}
+		if (opts.allowedSensitivities) {
+			if (!opts.allowedSensitivities.length) return [];
+			pushInClause(
+				conditions,
+				params,
+				"m.sensitivity",
+				"$sens",
+				opts.allowedSensitivities,
+			);
+		}
+		if (opts.minTrustRank !== undefined) {
+			const allowed = SOURCE_TRUST_LEVELS.filter(
+				(_, index) => index >= (opts.minTrustRank ?? 0),
+			);
+			if (!allowed.length) return [];
+			pushInClause(conditions, params, "m.source_trust", "$trust", allowed);
+		}
+		if (opts.excludeContent) {
+			conditions.push("m.content != $exclude");
+			params.$exclude = opts.excludeContent;
+		}
+		const sql = `SELECT ${FTS_LIGHT_COLUMNS}
+			 FROM fortune_memories_fts
+			 JOIN fortune_memories m ON m.id = fortune_memories_fts.id
+			 WHERE ${conditions.join(" AND ")}
+			 ORDER BY bm25(fortune_memories_fts, 0.0, 1.0, 0.5, 0.2), m.confidence DESC
+			 LIMIT $limit`;
+		return this.statement(sql).all(params).map(rowToMemory);
 	}
 
 	async count(): Promise<{ active: number; forgotten: number }> {
