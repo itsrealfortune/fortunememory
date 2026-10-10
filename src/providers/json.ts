@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { inWindow, memoryContentHash, type MemoryRecord } from "../schema.ts";
+import type { NumericVector } from "../vectors.ts";
 import type {
 	FortuneProvider,
 	IterateOptions,
@@ -68,7 +69,7 @@ export class JsonProvider implements FortuneProvider {
 		this.dirty = false;
 	}
 
-	private setRow(record: MemoryRecord, vector: number[] | null): void {
+	private setRow(record: MemoryRecord, vector: NumericVector | null): void {
 		const known = this.index.get(record.id);
 		const stored: StoredRow = { memory: record, vector };
 		if (known !== undefined) this.rows[known] = stored;
@@ -82,13 +83,13 @@ export class JsonProvider implements FortuneProvider {
 
 	async addMemory(
 		memory: MemoryRecord,
-		vector: number[] | null,
+		vector: NumericVector | null,
 	): Promise<void> {
 		this.setRow(memory, vector);
 	}
 
 	async addMany(
-		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+		entries: Array<{ memory: MemoryRecord; vector: NumericVector | null }>,
 	): Promise<void> {
 		if (!entries.length) return;
 		for (const entry of entries) {

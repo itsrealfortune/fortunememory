@@ -41,9 +41,14 @@ export {
 	resolveVectorProvider,
 	tokenize,
 } from "./vectors.ts";
-export type { VectorProvider } from "./vectors.ts";
+export type { NumericVector, VectorProvider } from "./vectors.ts";
 
-export type { FortuneProvider, StoredRow } from "./providers/interface.ts";
+export type {
+	FortuneProvider,
+	IterateOptions,
+	ProviderCapabilities,
+	StoredRow,
+} from "./providers/interface.ts";
 export { JsonProvider, jsonProviderFactory } from "./providers/json.ts";
 export {
 	CsvProvider,

@@ -62,7 +62,7 @@ const check = (name, cond) => {
   check("pglite write/read roundtrip", back?.content === "hello world");
   const rows = [];
   for await (const r of seed.iterate(false, {})) rows.push(r);
-  check("pglite iterate with vectors", rows.length === 1 && Array.isArray(rows[0].vector) && rows[0].vector.length === 2);
+  check("pglite iterate with vectors", rows.length === 1 && rows[0].vector?.length === 2);
   const novec = [];
   for await (const r of seed.iterate(false, { withVectors: false })) novec.push(r);
   check("pglite iterate without vectors", novec.length === 1 && novec[0].vector === null);

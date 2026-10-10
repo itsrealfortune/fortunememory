@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { inWindow, memoryContentHash, type MemoryRecord } from "../schema.ts";
+import type { NumericVector } from "../vectors.ts";
 import type {
 	FortuneProvider,
 	IterateOptions,
@@ -113,7 +114,7 @@ export function csvParse(text: string): string[][] {
 // Encoding CSV avec l'ordre HEADER.
 export function memoryToCells(row: {
 	memory: MemoryRecord;
-	vector: number[] | null;
+	vector: NumericVector | null;
 }): string[] {
 	const memory = row.memory;
 	return [
@@ -184,7 +185,7 @@ export class CsvProvider implements FortuneProvider {
 
 	async addMemory(
 		memory: MemoryRecord,
-		vector: number[] | null,
+		vector: NumericVector | null,
 	): Promise<void> {
 		const row: StoredRow = { memory, vector };
 		this.index.set(memory.id, this.rows.length);
@@ -193,7 +194,7 @@ export class CsvProvider implements FortuneProvider {
 	}
 
 	async addMany(
-		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+		entries: Array<{ memory: MemoryRecord; vector: NumericVector | null }>,
 	): Promise<void> {
 		if (!entries.length) return;
 		const base = this.rows.length;
@@ -270,7 +271,7 @@ export class CsvProvider implements FortuneProvider {
 
 function csvLine(row: {
 	memory: MemoryRecord;
-	vector: number[] | null;
+	vector: NumericVector | null;
 }): string {
 	return csvLineText(memoryToCells(row));
 }
@@ -282,7 +283,7 @@ export function csvLineText(cells: string[]): string {
 /** Réécriture atomique complète du CSV. */
 function rewriteFile(
 	filePath: string,
-	rows: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+	rows: Array<{ memory: MemoryRecord; vector: NumericVector | null }>,
 ): void {
 	const tmp = `${filePath}.tmp`;
 	const lines = new Array<string>(rows.length + 1);
@@ -322,7 +323,7 @@ export function rowToMemory(row: Record<string, string | null>): MemoryRecord {
 	};
 }
 
-export function parseVector(text: string | null): number[] | null {
+export function parseVector(text: string | null): NumericVector | null {
 	if (!text) return null;
 	try {
 		const parsed = JSON.parse(text);

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FortuneMemoryManager, sqliteProviderFactory, FeatureHashEncoder, tokenize, cosineSimilarity } from "../dist/index.js";
 
-const N = 500, QUERIES = 50;
+const N = Number(process.env.BENCH_N || 500), QUERIES = Number(process.env.BENCH_QUERIES || 50);
 const dir = mkdtempSync(join(tmpdir(), "fm-bench-"));
 const provider = sqliteProviderFactory(dir);
 await provider.init();

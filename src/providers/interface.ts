@@ -8,10 +8,18 @@
  */
 
 import type { MemoryRecord } from "../schema.ts";
+import type { NumericVector } from "../vectors.ts";
 
 export interface StoredRow {
 	memory: MemoryRecord;
-	vector: number[] | null;
+	vector: NumericVector | null;
+}
+
+/** Capacités optionnelles advertis par un provider (permettent des
+ * optimisations côté manager sans casser les providers minimalistes). */
+export interface ProviderCapabilities {
+	/** iterate() respecte IterateOptions.recentFirst (ordre garanti). */
+	recentFirst?: boolean;
 }
 
 export interface IterateOptions {
@@ -23,10 +31,18 @@ export interface IterateOptions {
 	 * stockées sont normalisées UTC donc l'ordre lexicographique vaut
 	 * chronologique). */
 	asOf?: string;
+	/** Ordonne du plus récent au plus ancien (occurredAt || validFrom ||
+	 * createdAt, décroissant) - tri poussé en SQL. Les providers qui ne
+	 * peuvent pas garantir l'ordre ignorent l'option (le manager détecte
+	 * capabilities.recentFirst avant de s'y fier). */
+	recentFirst?: boolean;
 }
 
 export interface FortuneProvider {
 	readonly name: string;
+
+	/** Capacités optionnelles (cf. ProviderCapabilities). */
+	readonly capabilities?: ProviderCapabilities;
 
 	/** Création idempotente des tables / fichiers. */
 	init(): Promise<void>;
@@ -34,13 +50,21 @@ export interface FortuneProvider {
 	close(): Promise<void>;
 
 	/** Insertion complète (record déjà normalisé + vecteur encodé ou null). */
-	addMemory(memory: MemoryRecord, vector: number[] | null): Promise<void>;
+	addMemory(memory: MemoryRecord, vector: NumericVector | null): Promise<void>;
 
 	/** Insertion groupée (défaut : boucle addMemory). Les providers fichier
 	 * ne flushent qu'une fois ; les providers SQL en une transaction. */
 	addMany?(
-		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+		entries: Array<{ memory: MemoryRecord; vector: NumericVector | null }>,
 	): Promise<void>;
+
+	/**
+	 * Dédup (optionnel) : premier souvenir ACTIF du scope donné (exact ou
+	 * sous-scope `scope/`) dont le contentHash correspond. Poussé en SQL
+	 * quand la colonne + l'index existent ; sinon le manager rescanne via
+	 * iterate() (comportement historique, O(n)).
+	 */
+	findByContentHash?(hash: string, scope: string): Promise<MemoryRecord | null>;
 
 	/** Soft-delete : status=forgotten + forgottenAt. Retourne false si id inconnu. */
 	updateStatus(

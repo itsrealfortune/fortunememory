@@ -7,10 +7,15 @@
  */
 
 import { memoryContentHash, type MemoryRecord } from "../schema.ts";
-import { encodeVectorBlob, parseVectorBlob } from "../vectors.ts";
+import {
+	encodeVectorBlob,
+	parseVectorBlob,
+	type NumericVector,
+} from "../vectors.ts";
 import type {
 	FortuneProvider,
 	IterateOptions,
+	ProviderCapabilities,
 	StoredRow,
 } from "./interface.ts";
 
@@ -36,12 +41,19 @@ const COLUMNS = [
 	"forgotten_at",
 	"vector",
 	"vector_blob",
+	"content_hash",
 ] as const;
 
 const UPSERT_SQL = `INSERT INTO fortune_memories (${COLUMNS.join(", ")}) VALUES (${COLUMNS.map((_, index) => `$${index + 1}`).join(", ")})
        ON CONFLICT (id) DO UPDATE SET ${COLUMNS.slice(1)
 					.map((column, index) => `${column} = $${index + 2}`)
 					.join(", ")}`;
+
+const ORDER_CREATED_DESC = "ORDER BY created_at DESC";
+/** Tri récent poussé en SQL : dates normalisées UTC → ordre lexicographique
+ * = chronologique. */
+const ORDER_RECENT_DESC =
+	"ORDER BY COALESCE(occurred_at, valid_from, created_at) DESC";
 const CREATE_TABLE_POSTGRES = `
   CREATE TABLE IF NOT EXISTS fortune_memories (
     id TEXT PRIMARY KEY,
@@ -64,7 +76,8 @@ const CREATE_TABLE_POSTGRES = `
     updated_at TEXT NOT NULL,
     forgotten_at TEXT,
     vector TEXT,
-    vector_blob BYTEA
+    vector_blob BYTEA,
+    content_hash TEXT
   );
   CREATE INDEX IF NOT EXISTS fortune_memories_scope_idx
     ON fortune_memories(scope, status);
@@ -92,12 +105,14 @@ const CREATE_TABLE_MYSQL = `
     updated_at VARCHAR(32) NOT NULL,
     forgotten_at TEXT,
     vector LONGTEXT,
+    content_hash TEXT,
     INDEX fortune_memories_scope (scope(64), status)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 `;
 
 export class PgliteProvider implements FortuneProvider {
 	readonly name = "pglite";
+	readonly capabilities: ProviderCapabilities = { recentFirst: true };
 	private client: Awaited<ReturnType<typeof importPGlite>> | null = null;
 	private readonly config: { dataDir?: string };
 
@@ -126,6 +141,35 @@ export class PgliteProvider implements FortuneProvider {
 		} catch {
 			// Déjà présente.
 		}
+		try {
+			await this.client.exec(
+				"ALTER TABLE fortune_memories ADD COLUMN content_hash TEXT",
+			);
+		} catch {
+			// Déjà présente.
+		}
+		// Index dédup (après ALTER : les bases legacy n'avaient pas la colonne).
+		try {
+			await this.client.exec(
+				"CREATE INDEX IF NOT EXISTS fortune_memories_hash_idx ON fortune_memories(content_hash, scope)",
+			);
+		} catch {
+			// Index déjà présent.
+		}
+		// Backfill : les lignes legacy n'ont pas de hash - la dédup SQL les
+		// trouverait sinon.
+		const legacy = await this.client.query(
+			"SELECT id, content FROM fortune_memories WHERE content_hash IS NULL",
+		);
+		for (const row of (legacy.rows ?? []) as Array<{
+			id?: unknown;
+			content?: unknown;
+		}>) {
+			await this.client.query(
+				"UPDATE fortune_memories SET content_hash=$1 WHERE id=$2",
+				[memoryContentHash(String(row.content ?? "")), String(row.id)],
+			);
+		}
 	}
 
 	async close(): Promise<void> {
@@ -135,7 +179,7 @@ export class PgliteProvider implements FortuneProvider {
 
 	private memoryToParams(
 		memory: MemoryRecord,
-		vector: number[] | null,
+		vector: NumericVector | null,
 	): unknown[] {
 		return [
 			memory.id,
@@ -159,12 +203,13 @@ export class PgliteProvider implements FortuneProvider {
 			memory.forgottenAt ?? null,
 			null, // colonne legacy : le vecteur vit dans vector_blob
 			vector ? encodeVectorBlob(vector) : null,
+			memory.contentHash ?? memoryContentHash(memory.content),
 		];
 	}
 
 	async addMemory(
 		memory: MemoryRecord,
-		vector: number[] | null,
+		vector: NumericVector | null,
 	): Promise<void> {
 		memory.contentHash =
 			memory.contentHash ?? memoryContentHash(memory.content);
@@ -173,7 +218,7 @@ export class PgliteProvider implements FortuneProvider {
 	}
 
 	async addMany(
-		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+		entries: Array<{ memory: MemoryRecord; vector: NumericVector | null }>,
 	): Promise<void> {
 		if (!entries.length) return;
 		const width = COLUMNS.length;
@@ -212,6 +257,21 @@ export class PgliteProvider implements FortuneProvider {
 		return (result.changes ?? result.rowCount ?? 0) > 0;
 	}
 
+	/** Dédup O(1) via fortune_memories_hash_idx (content_hash, scope). */
+	async findByContentHash(
+		hash: string,
+		scope: string,
+	): Promise<MemoryRecord | null> {
+		if (!hash) return null;
+		const client = await this.require();
+		const result = await client.query(
+			"SELECT * FROM fortune_memories WHERE content_hash=$1 AND status='active' AND (scope=$2 OR scope LIKE $3) ORDER BY created_at DESC LIMIT 1",
+			[hash, scope, `${scope}/%`],
+		);
+		const row = result.rows?.[0];
+		return row ? rowToMemory(row as never) : null;
+	}
+
 	async getMemory(
 		id: string,
 		includeForgotten = false,
@@ -234,7 +294,9 @@ export class PgliteProvider implements FortuneProvider {
 		const client = await this.require();
 		const columns =
 			opts.withVectors === false
-				? COLUMNS.filter((column) => column !== "vector").join(", ")
+				? COLUMNS.filter(
+						(column) => column !== "vector" && column !== "vector_blob",
+					).join(", ")
 				: "*";
 		const conditions: string[] = [];
 		const params: unknown[] = [];
@@ -246,8 +308,9 @@ export class PgliteProvider implements FortuneProvider {
 			params.push(opts.scopePrefix, `${opts.scopePrefix}/%`);
 		}
 		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+		const order = opts.recentFirst ? ORDER_RECENT_DESC : ORDER_CREATED_DESC;
 		const result = await client.query(
-			`SELECT ${columns} FROM fortune_memories ${where} ORDER BY created_at DESC`,
+			`SELECT ${columns} FROM fortune_memories ${where} ${order}`,
 			params.length ? params : undefined,
 		);
 		for (const row of result.rows ?? []) {
@@ -307,6 +370,7 @@ async function importPGlite(dataDir?: string | undefined): Promise<{
 
 export class MysqlProvider implements FortuneProvider {
 	readonly name = "mysql";
+	readonly capabilities: ProviderCapabilities = { recentFirst: true };
 	private conn: {
 		query(sql: string, params?: unknown[]): Promise<unknown[]>;
 		end(): Promise<void>;
@@ -339,6 +403,32 @@ export class MysqlProvider implements FortuneProvider {
 		} catch {
 			// Déjà présente.
 		}
+		try {
+			await this.conn.execute(
+				"ALTER TABLE fortune_memories ADD COLUMN content_hash TEXT",
+			);
+		} catch {
+			// Déjà présente.
+		}
+		// Index dédup (après ALTER : les bases legacy n'avaient pas la colonne).
+		try {
+			await this.conn.execute(
+				"CREATE INDEX fortune_memories_hash_idx ON fortune_memories (content_hash(64), scope(64))",
+			);
+		} catch {
+			// Index déjà présent.
+		}
+		// Backfill : les lignes legacy n'ont pas de hash - la dédup SQL les
+		// trouverait sinon.
+		const legacy = (await this.query(
+			"SELECT id, content FROM fortune_memories WHERE content_hash IS NULL",
+		)) as Array<{ id?: unknown; content?: unknown }>;
+		for (const row of legacy) {
+			await this.execute(
+				"UPDATE fortune_memories SET content_hash=? WHERE id=?",
+				[memoryContentHash(String(row.content ?? "")), String(row.id)],
+			);
+		}
 	}
 
 	async close(): Promise<void> {
@@ -348,7 +438,7 @@ export class MysqlProvider implements FortuneProvider {
 
 	private memoryToParams(
 		memory: MemoryRecord,
-		vector: number[] | null,
+		vector: NumericVector | null,
 	): unknown[] {
 		return [
 			memory.id,
@@ -372,6 +462,7 @@ export class MysqlProvider implements FortuneProvider {
 			memory.forgottenAt ?? null,
 			null, // colonne legacy : le vecteur vit dans vector_blob
 			vector ? encodeVectorBlob(vector) : null,
+			memory.contentHash ?? memoryContentHash(memory.content),
 		];
 	}
 
@@ -396,7 +487,7 @@ export class MysqlProvider implements FortuneProvider {
 
 	async addMemory(
 		memory: MemoryRecord,
-		vector: number[] | null,
+		vector: NumericVector | null,
 	): Promise<void> {
 		memory.contentHash =
 			memory.contentHash ?? memoryContentHash(memory.content);
@@ -407,7 +498,7 @@ export class MysqlProvider implements FortuneProvider {
 	}
 
 	async addMany(
-		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+		entries: Array<{ memory: MemoryRecord; vector: NumericVector | null }>,
 	): Promise<void> {
 		if (!entries.length) return;
 		const single = `(${COLUMNS.map(() => "?").join(", ")})`;
@@ -437,6 +528,19 @@ export class MysqlProvider implements FortuneProvider {
 		return (result?.affectedRows ?? 0) > 0;
 	}
 
+	/** Dédup O(1) via fortune_memories_hash_idx (content_hash, scope). */
+	async findByContentHash(
+		hash: string,
+		scope: string,
+	): Promise<MemoryRecord | null> {
+		if (!hash) return null;
+		const rows = (await this.query(
+			"SELECT * FROM fortune_memories WHERE content_hash=? AND status='active' AND (scope=? OR scope LIKE ?) ORDER BY created_at DESC LIMIT 1",
+			[hash, scope, `${scope}/%`],
+		)) as Array<Record<string, unknown>>;
+		return rows.length ? rowToMemory(rows[0]!) : null;
+	}
+
 	async getMemory(
 		id: string,
 		includeForgotten = false,
@@ -456,7 +560,9 @@ export class MysqlProvider implements FortuneProvider {
 	): AsyncIterable<StoredRow> {
 		const columns =
 			opts.withVectors === false
-				? COLUMNS.filter((column) => column !== "vector").join(", ")
+				? COLUMNS.filter(
+						(column) => column !== "vector" && column !== "vector_blob",
+					).join(", ")
 				: "*";
 		const conditions: string[] = [];
 		const params: unknown[] = [];
@@ -473,7 +579,8 @@ export class MysqlProvider implements FortuneProvider {
 			params.push(opts.asOf, opts.asOf);
 		}
 		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-		const sql = `SELECT ${columns} FROM fortune_memories ${where} ORDER BY created_at DESC`;
+		const order = opts.recentFirst ? ORDER_RECENT_DESC : ORDER_CREATED_DESC;
+		const sql = `SELECT ${columns} FROM fortune_memories ${where} ${order}`;
 		const rows = (await this.query(
 			sql,
 			params.length ? params : undefined,
@@ -501,7 +608,7 @@ export class MysqlProvider implements FortuneProvider {
 	}
 }
 
-function parseVector(row: Record<string, unknown>): number[] | null {
+function parseVector(row: Record<string, unknown>): NumericVector | null {
 	return parseVectorBlob(row.vector_blob, row.vector);
 }
 
@@ -522,7 +629,10 @@ function rowToMemory(row: Record<string, unknown>): MemoryRecord {
 		id: String(row.id),
 		type: String(row.type) as MemoryRecord["type"],
 		content,
-		contentHash: memoryContentHash(content),
+		contentHash:
+			typeof row.content_hash === "string" && row.content_hash
+				? row.content_hash
+				: memoryContentHash(content),
 		summary: String(row.summary ?? ""),
 		source: {
 			kind: String(row.source_kind ?? "manual"),

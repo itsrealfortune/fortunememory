@@ -11,7 +11,7 @@ import { pathToFileURL } from "node:url";
 import { FortuneMemoryManager } from "./manager.ts";
 import { FeatureHashEncoder, cosineSimilarity } from "./vectors.ts";
 import { memoryContentHash } from "./schema.ts";
-import type { FortuneProvider } from "./providers/interface.ts";
+import type { FortuneProvider, IterateOptions } from "./providers/interface.ts";
 import { jsonProviderFactory } from "./providers/json.ts";
 import { csvProviderFactory } from "./providers/csv.ts";
 import { sqliteProviderFactory } from "./providers/sqlite.ts";
@@ -30,7 +30,9 @@ function check(label: string, condition: boolean): void {
 	}
 }
 
-/** Provider wrapper : init auto à la première opération. */
+/** Provider wrapper : init auto à la première opération.
+ * Forward les options iterate + capabilities + findByContentHash pour que la
+ * suite exerce les vrais chemins provider (pushdown SQL, dédup O(1)). */
 function autoInit(provider: FortuneProvider): FortuneProvider {
 	const ready = provider.init();
 
@@ -40,8 +42,14 @@ function autoInit(provider: FortuneProvider): FortuneProvider {
 			return fn();
 		})();
 
+	const findByContentHash = provider.findByContentHash?.bind(provider);
+
 	return {
 		name: provider.name,
+		capabilities: provider.capabilities,
+		findByContentHash: findByContentHash
+			? (hash, scope) => queue(() => findByContentHash(hash, scope))
+			: undefined,
 		init: () => queue(() => provider.init()),
 		close: () => queue(() => provider.close()),
 		addMemory: (memory, vector) =>
@@ -50,9 +58,12 @@ function autoInit(provider: FortuneProvider): FortuneProvider {
 			queue(() => provider.updateStatus(id, status, at)),
 		getMemory: (id, includeForgotten) =>
 			queue(() => provider.getMemory(id, includeForgotten)),
-		iterate: async function* (includeForgotten?: boolean) {
+		iterate: async function* (
+			includeForgotten?: boolean,
+			opts?: IterateOptions,
+		) {
 			await ready;
-			yield* provider.iterate(includeForgotten);
+			yield* provider.iterate(includeForgotten, opts);
 		},
 		count: () => queue(() => provider.count()),
 	};
@@ -175,6 +186,25 @@ async function runSuite(
 			scope: "discord/dm/42",
 		});
 		check("remember déduplique le contenu identique", dupe.id === fox.id);
+
+		// list : tri occurredAt récent → ancien (recentFirst + early-exit)
+		await manager.remember({
+			content: "événement ancien",
+			type: "event",
+			scope: "discord/dm/42",
+			occurredAt: "2020-01-01T00:00:00.000Z",
+		});
+		await manager.remember({
+			content: "événement récent",
+			type: "event",
+			scope: "discord/dm/42",
+			occurredAt: "2030-01-01T00:00:00.000Z",
+		});
+		const recent = await manager.list({ scope: "discord/dm/42", limit: 3 });
+		check(
+			"list ordonne récent → ancien (occurredAt)",
+			recent[0]?.content === "événement récent",
+		);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

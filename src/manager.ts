@@ -29,6 +29,7 @@ import {
 	cosineSimilarity,
 	dotProduct,
 	tokenize,
+	type NumericVector,
 	type VectorProvider,
 } from "./vectors.ts";
 import type { FortuneProvider } from "./providers/interface.ts";
@@ -109,18 +110,23 @@ export class FortuneMemoryManager {
 		// Dédup par hash de contenu dans le même scope : un souvenir déjà actif
 		// à l'identique est retourné tel quel, pas re-stocké (protection contre
 		// les double-calls du modèle / retry d'outils).
-		const duplicate = await this.findByContentHash(
-			memory.contentHash ?? "",
-			memory.scope,
-		);
+		const duplicate = this.provider.findByContentHash
+			? await this.provider.findByContentHash(
+					memory.contentHash ?? "",
+					memory.scope,
+				)
+			: await this.scanByContentHash(memory.contentHash ?? "", memory.scope);
 		if (duplicate) return duplicate;
 		await this.provider.addMemory(memory, await this.encodeMemory(memory));
 		this.lexicalCache.delete(memory.id);
 		return memory;
 	}
 
-	/** Premier souvenir actif actif d'un contentHash donné dans un scope (préfixe). */
-	private async findByContentHash(
+	/**
+	 * Repli dédup pour les providers sans findByContentHash : scan complet
+	 * (comportement historique, O(n) - le temps d'une itération sans vecteurs).
+	 */
+	private async scanByContentHash(
 		hash: string,
 		scope: string,
 	): Promise<MemoryRecord | null> {
@@ -137,7 +143,7 @@ export class FortuneMemoryManager {
 		return null;
 	}
 
-	private similarity(left: number[], right: number[]): number {
+	private similarity(left: NumericVector, right: NumericVector): number {
 		// Vecteurs FeatureHashEncoder déjà L2-normés → simple dot, sans sqrt.
 		if (this.vectorProvider instanceof FeatureHashEncoder) {
 			return dotProduct(left, right);
@@ -185,6 +191,10 @@ export class FortuneMemoryManager {
 	/**
 	 * Souvenirs actifs les plus récents (occurredAt sinon createdAt), filtres
 	 * appliqués dans le manager.
+	 *
+	 * Si le provider advertise capabilities.recentFirst, les lignes arrivent
+	 * déjà triées récent → ancien : on s'arrête dès `limit` lignes retenues
+	 * (au lieu de materialiser tout le store pour en garder 20).
 	 */
 	async list(
 		options: {
@@ -196,22 +206,29 @@ export class FortuneMemoryManager {
 		} = {},
 	): Promise<MemoryRecord[]> {
 		const limit = clamp(options.limit ?? 20, 1, 100);
-		const candidates = await this.filterRows(
-			this.provider.iterate(false, {
-				withVectors: false,
-				scopePrefix: options.scope,
-				asOf: options.asOf,
-			}),
-			options,
-		);
-		const decorated = candidates.map((row) => ({
-			row,
-			ts: parseDate(
-				row.memory.occurredAt || row.memory.validFrom || row.memory.createdAt,
-			),
-		}));
-		decorated.sort((left, right) => right.ts - left.ts);
-		return decorated.slice(0, limit).map((entry) => entry.row.memory);
+		const matches = this.rowFilter(options);
+		const early = Boolean(this.provider.capabilities?.recentFirst);
+		const top: Array<{ memory: MemoryRecord; ts: number }> = [];
+		for await (const row of this.provider.iterate(false, {
+			withVectors: false,
+			scopePrefix: options.scope,
+			asOf: options.asOf,
+			recentFirst: true,
+		})) {
+			if (!matches(row.memory)) continue;
+			const entry = {
+				memory: row.memory,
+				ts: recentTimestamp(row.memory),
+			};
+			if (early) {
+				insertBounded(top, entry, limit);
+				if (top.length >= limit) break;
+			} else {
+				top.push(entry);
+			}
+		}
+		if (!early) top.sort((left, right) => right.ts - left.ts);
+		return top.slice(0, limit).map((entry) => entry.memory);
 	}
 
 	// ── Recherche ───────────────────────────────────────────────────────────
@@ -290,7 +307,7 @@ export class FortuneMemoryManager {
 	}
 
 	private async rankConflicts(
-		rows: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+		rows: Array<{ memory: MemoryRecord; vector: NumericVector | null }>,
 		queryVector: number[],
 		threshold: number,
 		limit: number,
@@ -360,10 +377,9 @@ export class FortuneMemoryManager {
 	 * Filtres métier : scope préfixe, type, maxSensitivity, minSourceTrust,
 	 * fenêtre temporelle (validFrom/validTo vs asOf), exclusion de contenu.
 	 */
-	private async filterRows(
-		iter: AsyncIterable<{ memory: MemoryRecord; vector: number[] | null }>,
+	private rowFilter(
 		options: SearchOptions & { asOf?: string },
-	): Promise<Array<{ memory: MemoryRecord; vector: number[] | null }>> {
+	): (memory: MemoryRecord) => boolean {
 		const asOf = options.asOf ?? new Date().toISOString();
 		const maxSensitivityRank = SENSITIVITY_RANK(
 			options.maxSensitivity ?? "restricted",
@@ -371,25 +387,41 @@ export class FortuneMemoryManager {
 		const minTrustRank = options.minSourceTrust
 			? TRUST_RANK(options.minSourceTrust)
 			: 0;
-
-		const rows: Array<{ memory: MemoryRecord; vector: number[] | null }> = [];
-		for await (const row of iter) {
-			const memory = row.memory;
-			if (options.scope && !scopeMatches(memory.scope, options.scope)) continue;
-			if (options.type && memory.type !== options.type) continue;
-			if (SENSITIVITY_RANK(memory.sensitivity) > maxSensitivityRank) continue;
-			if (TRUST_RANK(memory.sourceTrust) < minTrustRank) continue;
-			if (!inWindow(memory.validFrom, memory.validTo, asOf)) continue;
+		return (memory) => {
+			if (options.scope && !scopeMatches(memory.scope, options.scope))
+				return false;
+			if (options.type && memory.type !== options.type) return false;
+			if (SENSITIVITY_RANK(memory.sensitivity) > maxSensitivityRank)
+				return false;
+			if (TRUST_RANK(memory.sourceTrust) < minTrustRank) return false;
+			if (!inWindow(memory.validFrom, memory.validTo, asOf)) return false;
 			if (options.excludeContent && memory.content === options.excludeContent)
-				continue;
-			rows.push(row);
+				return false;
+			return true;
+		};
+	}
+
+	private async filterRows(
+		iter: AsyncIterable<{
+			memory: MemoryRecord;
+			vector: NumericVector | null;
+		}>,
+		options: SearchOptions & { asOf?: string },
+	): Promise<Array<{ memory: MemoryRecord; vector: NumericVector | null }>> {
+		const matches = this.rowFilter(options);
+		const rows: Array<{
+			memory: MemoryRecord;
+			vector: NumericVector | null;
+		}> = [];
+		for await (const row of iter) {
+			if (matches(row.memory)) rows.push(row);
 		}
 		return rows;
 	}
 
 	/** Score lexical simple : recouvrement de tokens ∈ {summary, content, tags}. */
 	private scoreLexical(
-		rows: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+		rows: Array<{ memory: MemoryRecord; vector: NumericVector | null }>,
 		queryTokens: string[],
 		limit: number,
 	): SearchHit[] {
@@ -425,7 +457,7 @@ export class FortuneMemoryManager {
 
 	/** Score vectoriel cosine avec seuil, tri desc, top-limite. */
 	private async scoreVector(
-		rows: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+		rows: Array<{ memory: MemoryRecord; vector: NumericVector | null }>,
 		options: SearchOptions,
 		queryVector: number[],
 		limit: number,
@@ -614,6 +646,33 @@ function parseDate(value: string | null | undefined): number {
 	if (!value) return Number.NaN;
 	const time = Date.parse(value);
 	return time;
+}
+
+/** Clé de tri "récence" de list : occurredAt sinon validFrom sinon createdAt. */
+function recentTimestamp(memory: MemoryRecord): number {
+	const ts = parseDate(
+		memory.occurredAt || memory.validFrom || memory.createdAt,
+	);
+	// Date legacy corrompue → traitée comme la plus ancienne (jamais NaN dans
+	// les comparateurs, qui casseraient à la fois le tri et l'early-exit).
+	return Number.isNaN(ts) ? Number.NEGATIVE_INFINITY : ts;
+}
+
+/** Insertion dans un tableau trié décroissant, borné à `limit` entrées. */
+function insertBounded(
+	top: Array<{ memory: MemoryRecord; ts: number }>,
+	entry: { memory: MemoryRecord; ts: number },
+	limit: number,
+): void {
+	let index = top.length;
+	while (
+		index > 0 &&
+		(top[index - 1]?.ts ?? Number.NEGATIVE_INFINITY) < entry.ts
+	) {
+		index -= 1;
+	}
+	top.splice(index, 0, entry);
+	if (top.length > limit) top.pop();
 }
 
 function clip(text: string, max: number): string {

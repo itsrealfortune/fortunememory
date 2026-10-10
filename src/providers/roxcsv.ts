@@ -31,6 +31,7 @@ import {
 	parseVector,
 } from "./csv.ts";
 import { inWindow, memoryContentHash, type MemoryRecord } from "../schema.ts";
+import type { NumericVector } from "../vectors.ts";
 import type {
 	FortuneProvider,
 	IterateOptions,
@@ -97,7 +98,7 @@ export class RoxifiedCSVProvider implements FortuneProvider {
 
 	async addMemory(
 		memory: MemoryRecord,
-		vector: number[] | null,
+		vector: NumericVector | null,
 	): Promise<void> {
 		memory.contentHash =
 			memory.contentHash ?? memoryContentHash(memory.content);
@@ -112,7 +113,7 @@ export class RoxifiedCSVProvider implements FortuneProvider {
 	}
 
 	async addMany(
-		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+		entries: Array<{ memory: MemoryRecord; vector: NumericVector | null }>,
 	): Promise<void> {
 		if (!entries.length) return;
 		for (const entry of entries) {

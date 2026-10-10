@@ -106,10 +106,17 @@ export class FeatureHashEncoder implements VectorProvider {
 }
 
 /**
+ * Vecteur numérique : `number[]` (encodage externe / JSON) ou `Float32Array`
+ * (blobs décodés). Float32Array = mémoire ÷4 vs number[], dot product ~2×
+ * plus rapide, et zéro `Array.from` par ligne à la lecture.
+ */
+export type NumericVector = number[] | Float32Array | Float64Array;
+
+/**
  * Produit scalaire : exact pour les vecteurs L2-normés (FeatureHashEncoder),
  * évite 2 normes + 2 sqrt par comparaison dans le chemin search.
  */
-export function dotProduct(left: number[], right: number[]): number {
+export function dotProduct(left: NumericVector, right: NumericVector): number {
 	let dot = 0;
 	for (let index = 0; index < left.length; index++) {
 		dot += (left[index] ?? 0) * (right[index] ?? 0);
@@ -117,13 +124,11 @@ export function dotProduct(left: number[], right: number[]): number {
 	return dot;
 }
 
-export function cosineSimilarity(left: number[], right: number[]): number {
-	if (
-		!Array.isArray(left) ||
-		!Array.isArray(right) ||
-		left.length !== right.length
-	)
-		return 0;
+export function cosineSimilarity(
+	left: NumericVector,
+	right: NumericVector,
+): number {
+	if (left.length !== right.length) return 0;
 	let dot = 0;
 	let leftNorm = 0;
 	let rightNorm = 0;
@@ -277,7 +282,7 @@ export function resolveVectorProvider(
  * Sérialisation binaire des vecteurs : 1 octet de version + Float32.
  * ~1 Ko/ligne vs ~5 Ko en JSON, parse sans JSON.parse.
  */
-export function encodeVectorBlob(vector: number[]): Uint8Array {
+export function encodeVectorBlob(vector: NumericVector): Uint8Array {
 	const floats = new Float32Array(vector);
 	const out = new Uint8Array(1 + floats.byteLength);
 	out[0] = 1; // version 1 = Float32
@@ -288,28 +293,40 @@ export function encodeVectorBlob(vector: number[]): Uint8Array {
 	return out;
 }
 
-export function decodeVectorBlob(raw: Uint8Array): number[] | null {
+/**
+ * Décode un blob en Float32Array : vue zéro-copie quand l'alignement le
+ * permet (Float32 exige un offset multiple de 4), sinon un seul copiage
+ * aligné. Jamais de Array.from : 10k lignes = 10k vues légères, pas 10k
+ * tableaux JS alloués (~9µs/ligne gagnés au fetch).
+ */
+export function decodeVectorBlob(raw: Uint8Array): NumericVector | null {
 	if (raw.byteLength === 0) return null;
 	if (raw[0] === 1 && (raw.byteLength - 1) % 4 === 0) {
 		const count = (raw.byteLength - 1) / 4;
+		// Le Float32 commence à byteOffset+1 (l'octet 0 = version) : c'est cet
+		// alignement-là qui doit être multiple de 4 pour la vue zéro-copie.
+		if ((raw.byteOffset + 1) % 4 === 0) {
+			return new Float32Array(raw.buffer, raw.byteOffset + 1, count);
+		}
 		const aligned = new Uint8Array(count * 4);
 		aligned.set(raw.subarray(1));
-		return Array.from(
-			new Float32Array(aligned.buffer, aligned.byteOffset, count),
-		);
+		return new Float32Array(aligned.buffer, 0, count);
 	}
 	// Legacy : Float64 brut sans header (8 octets/composante).
 	if (raw.byteLength % 8 !== 0) return null;
-	const floats = new Float64Array(
-		raw.buffer,
-		raw.byteOffset,
-		raw.byteLength / 8,
-	);
-	return Array.from(floats);
+	if (raw.byteOffset % 8 === 0) {
+		return new Float64Array(raw.buffer, raw.byteOffset, raw.byteLength / 8);
+	}
+	const aligned = new Uint8Array(raw.byteLength);
+	aligned.set(raw);
+	return new Float64Array(aligned.buffer, 0, raw.byteLength / 8);
 }
 
 /** Blob binaire préféré, repli JSON legacy. */
-export function parseVectorBlob(blob: unknown, json: unknown): number[] | null {
+export function parseVectorBlob(
+	blob: unknown,
+	json: unknown,
+): NumericVector | null {
 	if (
 		typeof Uint8Array !== "undefined" &&
 		(blob instanceof Uint8Array ||
