@@ -214,6 +214,8 @@ export class FortuneMemoryManager {
 			scopePrefix: options.scope,
 			asOf: options.asOf,
 			recentFirst: true,
+			// Early-exit : le fetch peut s'arrêter à `limit` lignes retenues.
+			stream: early,
 		})) {
 			if (!matches(row.memory)) continue;
 			const entry = {

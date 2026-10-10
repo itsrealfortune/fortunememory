@@ -37,6 +37,9 @@ export interface SqliteStatement {
 	run(params?: SqliteParams): { changes: number };
 	get(params?: SqliteParams): SqliteRow | null | undefined;
 	all(params?: SqliteParams): SqliteRow[];
+	/** Streaming des lignes une par une (node:sqlite récent, bun:sqlite) ;
+	 * absent des vieux drivers → les chemins retombent sur all(). */
+	iterate?(params?: SqliteParams): IterableIterator<SqliteRow>;
 }
 
 export interface SqliteDatabase {
@@ -76,6 +79,7 @@ export async function openSqliteDatabase(
 							| undefined,
 					all: (params) =>
 						(hasParams(params) ? stmt.all(params) : stmt.all()) as SqliteRow[],
+					iterate: driverIterator(stmt),
 				};
 			},
 			close: () => {
@@ -90,6 +94,21 @@ export async function openSqliteDatabase(
 
 function hasParams(params: SqliteParams | undefined): params is SqliteParams {
 	return params !== undefined;
+}
+
+/**
+ * Streaming du driver (stmt.iterate) exposé quand il existe : node:sqlite
+ * récent et bun:sqlite le supportent, les vieux builds tombent sur all().
+ */
+function driverIterator(
+	stmt: unknown,
+): ((params?: SqliteParams) => IterableIterator<SqliteRow>) | undefined {
+	const iterate = (stmt as { iterate?: unknown }).iterate;
+	if (typeof iterate !== "function") return undefined;
+	const bound = iterate.bind(stmt) as (
+		params?: SqliteParams,
+	) => IterableIterator<SqliteRow>;
+	return (params) => (hasParams(params) ? bound(params) : bound());
 }
 
 async function openBunSqlite(
@@ -133,6 +152,7 @@ async function openBunSqlite(
 				}),
 				get: (params) => (hasParams(params) ? stmt.get(params) : stmt.get()),
 				all: (params) => (hasParams(params) ? stmt.all(params) : stmt.all()),
+				iterate: driverIterator(stmt),
 			};
 		},
 		close: () => {
@@ -425,14 +445,22 @@ export class SqliteProvider implements FortuneProvider {
 		}
 		if (opts.asOf) params.$asof = opts.asOf;
 		const bound = Object.keys(params).length ? params : undefined;
+		if (opts.stream) {
+			// Streaming opt-in : le consommateur peut break tôt (list) - le
+			// fetch s'arrête avec lui. Statement frais : node:sqlite verrouille
+			// le statement pendant un iterate, ne jamais streamer sur le
+			// statement préparé en cache. Sans iterate() côté driver : repli.
+			const streamed = this.require().prepare(sql);
+			const iterate = streamed.iterate;
+			if (iterate) {
+				for (const row of iterate.call(streamed, bound)) {
+					yield rowToRow(row, opts);
+				}
+				return;
+			}
+		}
 		for (const row of this.statement(sql).all(bound)) {
-			yield {
-				memory: rowToMemory(row),
-				vector:
-					opts.withVectors === false
-						? null
-						: parseVector(row.vector_blob_raw ?? row.vector_raw),
-			};
+			yield rowToRow(row, opts);
 		}
 	}
 
@@ -487,6 +515,16 @@ function parseVector(raw: unknown): NumericVector | null {
 	} catch {
 		return null;
 	}
+}
+
+function rowToRow(row: SqliteRow, opts: IterateOptions): StoredRow {
+	return {
+		memory: rowToMemory(row),
+		vector:
+			opts.withVectors === false
+				? null
+				: parseVector(row.vector_blob_raw ?? row.vector_raw),
+	};
 }
 
 function rowToMemory(row: Record<string, unknown>): MemoryRecord {

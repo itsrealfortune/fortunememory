@@ -36,6 +36,11 @@ export interface IterateOptions {
 	 * peuvent pas garantir l'ordre ignorent l'option (le manager détecte
 	 * capabilities.recentFirst avant de s'y fier). */
 	recentFirst?: boolean;
+	/** Le consommateur peut interrompre l'itération tôt (break) : préférer le
+	 * fetch paresseux du driver (stmt.iterate) à .all(). Sans effet sur les
+	 * full scans - iterate() coûte plus cher par ligne que .all() quand tout
+	 * est consommé (mesuré : +25% sur search à 10k). */
+	stream?: boolean;
 }
 
 export interface FortuneProvider {
