@@ -165,6 +165,37 @@ Release: `npm run publish-package` (tag `v*` → npm publish via GitHub Actions)
 
 ## Changelog
 
+### v1.1.0 - third optimization round (hot paths)
+
+O(1) content-hash dedup, `list` early-exit, Float32Array vector reads. No behavior changes — same results, faster paths. 80/80 tests green across all 5 installable providers; pglite verified live (fresh + legacy schema).
+
+<details>
+<summary>Benchmarks: v1.0.3 vs v1.1.0 (N=10 000, sqlite - click to expand)</summary>
+
+| Op | v1.0.3 | v1.1.0 | Factor |
+|---|---|---|---|
+| `remember` | 6.68 ms | 0.21 ms | **~32×** |
+| seed 10k memories (total) | 66.8 s | 2.1 s | **~32×** |
+| `list` (limit 20) | 119.9 ms | 43.8 ms | **2.7×** |
+| `search vector` | 294 ms | 200 ms | **1.5×** |
+| `search hybrid` | 293 ms | 237 ms | 1.2× |
+| `getContext` | 300 ms | 209 ms | 1.4× |
+| `findConflicts` | 32 ms | 23 ms | 1.4× |
+| `decodeVectorBlob` | 9.05 µs/row | 0.55 µs/row | **16×** |
+
+At N=500 (standard bench): `search vector` 11.0 → 7.3 ms, `list` 3.4 → 1.8 ms, no regression elsewhere.
+
+**Optimizations**
+- **Dedup O(1)**: new optional `FortuneProvider.findByContentHash()`, pushed to SQL against the `content_hash` index that existed since v1 but was never queried. Pglite/mysql gain the column + index + legacy-row backfill at init. Providers without the method keep the manager-side scan (identical behavior).
+- **`list` early-exit**: `IterateOptions.recentFirst` orders rows by `COALESCE(occurred_at, valid_from, created_at) DESC` (the exact JS sort key), advertised via `capabilities.recentFirst`; the manager stops reading after `limit` filtered rows with a bounded insertion array.
+- **Vectors**: `decodeVectorBlob` returns `Float32Array` views (zero-copy when aligned, single aligned copy otherwise) instead of `Array.from` per row; new exported `NumericVector` type flows through `StoredRow` and provider signatures.
+- pglite/mysql: `vector_blob` excluded from `withVectors: false` reads.
+
+**Fixes**
+- Test harness: `autoInit`'s `iterate` wrapper silently dropped its options argument — suites ran fallback paths without SQL pushdown or provider dedup. Now forwarded, plus a new list-ordering check.
+
+</details>
+
 ### v1.0.3 - second optimization round + provider bugfixes
 
 No result changes, 75/75 tests green. All providers (sqlite, json, csv, pglite, mysql) now executed live and green.

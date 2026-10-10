@@ -1,6 +1,6 @@
 {
 	"name": "fortunememory",
-	"version": "1.0.3",
+	"version": "1.1.0",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/itsrealfortune/fortunememory"
@@ -38,7 +38,13 @@
 		"LICENSE"
 	],
 	"homepage": "https://github.com/itsrealfortune/fortunememory#readme",
-	"keywords": ["memory", "agent", "sqlite", "vector-search", "opencode"],
+	"keywords": [
+		"memory",
+		"agent",
+		"sqlite",
+		"vector-search",
+		"opencode"
+	],
 	"license": "MIT",
 	"scripts": {
 		"prepack": "npm run build",
