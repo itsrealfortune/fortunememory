@@ -16,7 +16,7 @@ try {
   ({ ContextStore } = await import(pathToFileURL(join(refDir, "src/context/store.js")).href));
 }
 
-const N = 500, QUERIES = 50;
+const N = Number(process.env.BENCH_N || 500), QUERIES = Number(process.env.BENCH_QUERIES || 50);
 const mk = (i) => ({
   content: `Memory number ${i} about database pricing deadline meeting decision preference project alpha ${i % 100}`,
   type: i % 3 === 0 ? "fact" : "note",
