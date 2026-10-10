@@ -318,7 +318,11 @@ export class FortuneMemoryManager {
 		if (!queryTokens.length) return [];
 
 		const rows = await this.filterRows(
-			this.provider.iterate(false, { scopePrefix: input.scope }),
+			this.provider.iterate(false, {
+				scopePrefix: input.scope,
+				// Pushdown : le type filtre ~2/3 de la table en SQL, pas en JS.
+				typeFilter: String(input.type),
+			}),
 			{
 				scope: input.scope,
 				type: String(input.type) as MemoryType,

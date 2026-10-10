@@ -307,6 +307,10 @@ export class PgliteProvider implements FortuneProvider {
 			);
 			params.push(opts.scopePrefix, `${opts.scopePrefix}/%`);
 		}
+		if (opts.typeFilter) {
+			conditions.push(`type=$${params.length + 1}`);
+			params.push(opts.typeFilter);
+		}
 		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 		const order = opts.recentFirst ? ORDER_RECENT_DESC : ORDER_CREATED_DESC;
 		const result = await client.query(
@@ -577,6 +581,10 @@ export class MysqlProvider implements FortuneProvider {
 				"(valid_to IS NULL OR valid_to >= ?)",
 			);
 			params.push(opts.asOf, opts.asOf);
+		}
+		if (opts.typeFilter) {
+			conditions.push("type=?");
+			params.push(opts.typeFilter);
 		}
 		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 		const order = opts.recentFirst ? ORDER_RECENT_DESC : ORDER_CREATED_DESC;

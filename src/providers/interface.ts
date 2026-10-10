@@ -58,6 +58,8 @@ export interface IterateOptions {
 	 * full scans - iterate() coûte plus cher par ligne que .all() quand tout
 	 * est consommé (mesuré : +25% sur search à 10k). */
 	stream?: boolean;
+	/** Filtre type exact (poussé en SQL quand possible ; le manager revérifie). */
+	typeFilter?: string;
 }
 
 export interface FortuneProvider {

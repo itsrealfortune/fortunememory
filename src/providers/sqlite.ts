@@ -505,6 +505,9 @@ export class SqliteProvider implements FortuneProvider {
 				"(valid_to IS NULL OR valid_to >= $asof)",
 			);
 		}
+		if (opts.typeFilter) {
+			conditions.push("type = $typefilter");
+		}
 		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 		const order = opts.recentFirst ? ORDER_RECENT_DESC : ORDER_CREATED_DESC;
 		const sql = `SELECT ${columns} FROM fortune_memories ${where} ${order}`;
@@ -514,6 +517,7 @@ export class SqliteProvider implements FortuneProvider {
 			params.$scope_prefix = `${escapeLike(opts.scopePrefix)}/%`;
 		}
 		if (opts.asOf) params.$asof = opts.asOf;
+		if (opts.typeFilter) params.$typefilter = opts.typeFilter;
 		const bound = Object.keys(params).length ? params : undefined;
 		if (opts.stream) {
 			// Streaming opt-in : le consommateur peut break tôt (list) - le
