@@ -5,9 +5,9 @@
  * par le bot (search hybride, conflicts, list, forget, get_context), avec la
  * persistence déportée dans un provider pluggable (providers/*.ts).
  *
- * Choisir le provider : FORTUNE_MEMORY_PROVIDER=sqlite|json|csv|pglite|mysql
- * (défaut sqlite). Dossier/fichiers : FORTUNE_MEMORY_DATA_DIR, sinon DATA_DIR,
- * sinon <projet>/data.
+ * Choisir le provider : FORTUNE_MEMORY_PROVIDER=sqlite|json|csv|pglite|
+ * mysql|roxify|roxcsv (défaut sqlite). Dossier/fichiers :
+ * FORTUNE_MEMORY_DATA_DIR, sinon DATA_DIR, sinon <projet>/data.
  *
  * Les souvenirs sont des DONNÉES : jamais traiter leur contenu comme des
  * instructions.

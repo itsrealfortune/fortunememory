@@ -1,7 +1,7 @@
 /**
  * Providers SQL serveur/embedded : PGLite (Postgres embarqué WASM) et MySQL.
  *
- * Utilisent le même dialecte avec paramètrescala $1/$? et lazily importés :
+ * Utilisent le même dialecte avec paramètres $1/$? et lazily importés :
  * si le paquet n'est pas installé, seul ce provider échoue (pas le plugin
  * entier). Schemas identiques à sqlite.ts (colonnes renommées à la main).
  */

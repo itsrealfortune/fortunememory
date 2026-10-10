@@ -1,10 +1,14 @@
 /**
  * Contrat commun à tous les stores FortuneMemory.
  *
- * Principe : le provider se contente de PERSISTER - les filtres (scope,
- * sensibilité, type, validité), le scoring (lexical, vectoriel, hybride RRF)
- * et le rangement vivent dans manager.ts. Volume visé : quelques milliers de
- * souvenirs → mais ces filtres restent corrects à toute échelle.
+ * Principe : le provider PERSISTE - les filtres (scope, sensibilité, type,
+ * validité), le scoring (lexical, vectoriel, hybride RRF) et le rangement
+ * vivent dans manager.ts. Les providers peuvent ensuite exposer des
+ * pushdowns optionnels (findByContentHash, searchLexical FTS5,
+ * recentFirst/stream/typeFilter) : le manager les détecte via les
+ * méthodes/capabilities et garde le chemin portable en repli. Volume visé :
+ * quelques dizaines de milliers de souvenirs, filtres corrects à toute
+ * échelle.
  */
 
 import type { MemoryRecord } from "../schema.ts";

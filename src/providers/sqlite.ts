@@ -5,8 +5,11 @@
  * - Bun (runtime opencode) : `bun:sqlite` natif en repli.
  *
  * Le driver est résolu en lazy dans init() : l'import du module n'échoue
- * sur aucun runtime. Schéma : une table fortune_memories, vecteur sérialisé
- * JSON ; cosine reste dans manager.ts (portable à tous les providers).
+ * sur aucun runtime. Schéma : table fortune_memories (vecteur en blob
+ * Float32 versionné, repli JSON legacy) + index FTS5 pour le lexical.
+ * Pushdowns optionnels exposés : dedup content_hash, searchLexical bm25,
+ * recentFirst, stream, typeFilter - sans eux le manager tombe sur le
+ * chemin portable.
  */
 
 import { mkdirSync } from "node:fs";
