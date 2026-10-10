@@ -484,7 +484,9 @@ export class FortuneMemoryManager {
 		const memories = await provider.searchLexical(meaningful, {
 			limit,
 			scopePrefix: options.scope,
-			asOf: options.asOf,
+			// Même défaut que filterRows : fenêtre temporelle sur "maintenant",
+			// sans quoi une mémoire avec validTo passé passerait le pushdown.
+			asOf: options.asOf ?? new Date().toISOString(),
 			type: options.type,
 			allowedSensitivities: sensitivitiesUpTo(options.maxSensitivity),
 			minTrustRank: options.minSourceTrust
