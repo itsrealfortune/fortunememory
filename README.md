@@ -107,7 +107,7 @@ openself is SQLite-only. fortunememory lets you pick the backend per deployment 
 | `sqlite` (default) | native `node:sqlite`, FTS5 lexical | none |
 | `json` | single file, atomic writes | none |
 | `csv` | RFC-4180 CSV readable out-of-process | none |
-| `pglite` | embedded WASM Postgres | optional: `@electric-sql/pglite` |
+| `pglite` | embedded WASM Postgres, tsvector lexical | optional: `@electric-sql/pglite` |
 | `mysql` | MySQL server | optional: `mysql2` |
 | `roxify` | vault persisted as steganographic PNG | optional: `roxify` |
 | `roxcsv` | canonical CSV roxified into PNG | optional: `roxify` |
@@ -209,6 +209,7 @@ vs openself v1.0.1 — all rows green (openself used to lead lexical 1.8× and l
 - **Type pushdown**: `IterateOptions.typeFilter` honored by sqlite/pglite/mysql (`findConflicts` reads ~1/3 of the table in SQL).
 - **Bounded scoring**: top-K insertion during lexical/vector scoring instead of sort-all-then-truncate.
 - **LRU caches**: shared `TinyLru` evicts oldest entries instead of clearing `lexicalCache` / `FEATURE_CACHE` wholesale.
+- **pglite FTS**: `searchLexical` also lands on pglite via a generated `tsvector('simple', unaccent(...))` column + GIN index + `ts_rank` (75.7 → 9.7 ms/op at 2k). MySQL stays on the portable path: FULLTEXT's min-token-size (4) and stopword semantics would silently drop 3-char tokens.
 
 **Notes**
 - MySQL now verified live (MySQL 8, docker): 12/12 green — `content_hash` dedup, blob roundtrip, pushdowns. No untested backend left.
