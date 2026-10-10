@@ -15,9 +15,14 @@ import { memoryContentHash, type MemoryRecord } from "../schema.ts";
 import type {
 	FortuneProvider,
 	IterateOptions,
+	ProviderCapabilities,
 	StoredRow,
 } from "./interface.ts";
-import { decodeVectorBlob, encodeVectorBlob } from "../vectors.ts";
+import {
+	decodeVectorBlob,
+	encodeVectorBlob,
+	type NumericVector,
+} from "../vectors.ts";
 
 /** Ligne SQLite brute. */
 export type SqliteRow = Record<string, unknown>;
@@ -191,8 +196,24 @@ const INSERT = `
     forgotten_at=$forgotten_at, content_hash=$content_hash, vector=$vector, vector_blob=$vector_blob;
 `;
 
+/** Colonnes sans vecteurs (chemins lexical/list/dedup : pas de blob à fetcher). */
+const LIGHT_COLUMNS =
+	"id, type, content, summary, source_kind, source_locator, source_title, scope, sensitivity, source_trust, confidence, valid_from, valid_to, occurred_at, tags, status, created_at, updated_at, forgotten_at, content_hash";
+const FULL_COLUMNS = "*, vector AS vector_raw, vector_blob AS vector_blob_raw";
+const ORDER_CREATED_DESC = "ORDER BY created_at DESC";
+/** Tri récent poussé en SQL : les dates sont normalisées UTC à l'écriture,
+ * l'ordre lexicographique vaut chronologique. */
+const ORDER_RECENT_DESC =
+	"ORDER BY COALESCE(occurred_at, valid_from, created_at) DESC";
+
+function escapeLike(value: string): string {
+	return value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
 export class SqliteProvider implements FortuneProvider {
 	readonly name = "sqlite";
+	/** Tri récent → ancien poussé en SQL (COALESCE sur les dates normalisées). */
+	readonly capabilities: ProviderCapabilities = { recentFirst: true };
 	private readonly dbPath: string;
 	private db: SqliteDatabase | null = null;
 	private statements = new Map<string, SqliteStatement>();
@@ -282,7 +303,7 @@ export class SqliteProvider implements FortuneProvider {
 
 	private memoryToParams(
 		memory: MemoryRecord,
-		vectorSubmitted: number[] | null,
+		vectorSubmitted: NumericVector | null,
 	): SqliteParams {
 		return {
 			$id: memory.id,
@@ -312,7 +333,7 @@ export class SqliteProvider implements FortuneProvider {
 
 	async addMemory(
 		memory: MemoryRecord,
-		vector: number[] | null,
+		vector: NumericVector | null,
 	): Promise<void> {
 		memory.contentHash =
 			memory.contentHash ?? memoryContentHash(memory.content);
@@ -320,7 +341,7 @@ export class SqliteProvider implements FortuneProvider {
 	}
 
 	async addMany(
-		entries: Array<{ memory: MemoryRecord; vector: number[] | null }>,
+		entries: Array<{ memory: MemoryRecord; vector: NumericVector | null }>,
 	): Promise<void> {
 		if (!entries.length) return;
 		const db = this.require();
@@ -378,10 +399,7 @@ export class SqliteProvider implements FortuneProvider {
 		includeForgotten = false,
 		opts: IterateOptions = {},
 	): AsyncIterable<StoredRow> {
-		const columns =
-			opts.withVectors === false
-				? "id, type, content, summary, source_kind, source_locator, source_title, scope, sensitivity, source_trust, confidence, valid_from, valid_to, occurred_at, tags, status, created_at, updated_at, forgotten_at, content_hash"
-				: "*, vector AS vector_raw, vector_blob AS vector_blob_raw";
+		const columns = opts.withVectors === false ? LIGHT_COLUMNS : FULL_COLUMNS;
 		const conditions: string[] = [];
 		if (!includeForgotten) conditions.push("status = 'active'");
 		if (opts.scopePrefix) {
@@ -398,9 +416,8 @@ export class SqliteProvider implements FortuneProvider {
 			);
 		}
 		const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-		const sql = `SELECT ${columns} FROM fortune_memories ${where} ORDER BY created_at DESC`;
-		const escapeLike = (value: string): string =>
-			value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+		const order = opts.recentFirst ? ORDER_RECENT_DESC : ORDER_CREATED_DESC;
+		const sql = `SELECT ${columns} FROM fortune_memories ${where} ${order}`;
 		const params: SqliteParams = {};
 		if (opts.scopePrefix) {
 			params.$scope = opts.scopePrefix;
@@ -419,6 +436,28 @@ export class SqliteProvider implements FortuneProvider {
 		}
 	}
 
+	/**
+	 * Dédup en O(1) via fortune_memories_content_hash(content_hash, scope) -
+	 * l'index était déjà créé mais jamais interrogé (le manager scannait).
+	 */
+	async findByContentHash(
+		hash: string,
+		scope: string,
+	): Promise<MemoryRecord | null> {
+		if (!hash) return null;
+		const row = this.statement(
+			`SELECT ${LIGHT_COLUMNS} FROM fortune_memories
+			 WHERE content_hash = $hash AND status = 'active'
+			 AND (scope = $scope OR scope LIKE $scope_prefix ESCAPE '\\')
+			 ORDER BY created_at DESC LIMIT 1`,
+		).get({
+			$hash: hash,
+			$scope: scope,
+			$scope_prefix: `${escapeLike(scope)}/%`,
+		});
+		return row ? rowToMemory(row) : null;
+	}
+
 	async count(): Promise<{ active: number; forgotten: number }> {
 		const row = this.statement(
 			`SELECT
@@ -433,7 +472,7 @@ export class SqliteProvider implements FortuneProvider {
 	}
 }
 
-function parseVector(raw: unknown): number[] | null {
+function parseVector(raw: unknown): NumericVector | null {
 	if (
 		typeof Uint8Array !== "undefined" &&
 		(raw instanceof Uint8Array ||
