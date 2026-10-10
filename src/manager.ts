@@ -277,11 +277,7 @@ export class FortuneMemoryManager {
 		let vector: SearchHit[] = [];
 
 		if (sqlLexical) {
-			lexical = await this.scoreLexicalSql(
-				meaningful,
-				options,
-				candidateLimit,
-			);
+			lexical = await this.scoreLexicalSql(meaningful, options, candidateLimit);
 		} else if (retrieval !== "vector") {
 			lexical = this.scoreLexical(rows, queryTokens, candidateLimit);
 		}
@@ -467,18 +463,14 @@ export class FortuneMemoryManager {
 				1,
 				overlap / Math.max(1, meaningful.length),
 			);
-			scored.push({ hit: { memory: row.memory, lexicalScore }, lexicalScore });
+			insertTopK(
+				scored,
+				{ hit: { memory: row.memory, lexicalScore }, lexicalScore },
+				limit,
+				LEXICAL_BETTER,
+			);
 		}
-		return scored
-			.sort(
-				(left, right) =>
-					right.lexicalScore - left.lexicalScore ||
-					right.hit.memory.confidence - left.hit.memory.confidence ||
-					TRUST_RANK(right.hit.memory.sourceTrust) -
-						TRUST_RANK(left.hit.memory.sourceTrust),
-			)
-			.map((entry) => entry.hit)
-			.slice(0, limit);
+		return scored.map((entry) => entry.hit);
 	}
 
 	/** FTS5 : top-K bm25 en SQL, mêmes filtres métier que filterRows(). */
@@ -503,7 +495,7 @@ export class FortuneMemoryManager {
 		return memories.map((memory) => ({ memory }));
 	}
 
-	/** Score vectoriel cosine avec seuil, tri desc, top-limite. */
+	/** Score vectoriel cosine avec seuil, top-K inséré à la volée. */
 	private async scoreVector(
 		rows: Array<{ memory: MemoryRecord; vector: NumericVector | null }>,
 		options: SearchOptions,
@@ -516,16 +508,14 @@ export class FortuneMemoryManager {
 			if (!row.vector) continue;
 			const vectorScore = this.similarity(queryVector, row.vector);
 			if (vectorScore < minimum) continue;
-			candidates.push({ memory: row.memory, vectorScore });
+			insertTopK(
+				candidates,
+				{ memory: row.memory, vectorScore },
+				limit,
+				VECTOR_BETTER,
+			);
 		}
-		candidates.sort(
-			(left, right) =>
-				(right.vectorScore ?? 0) - (left.vectorScore ?? 0) ||
-				right.memory.confidence - left.memory.confidence ||
-				TRUST_RANK(right.memory.sourceTrust) -
-					TRUST_RANK(left.memory.sourceTrust),
-		);
-		return candidates.slice(0, limit);
+		return candidates;
 	}
 }
 
@@ -728,6 +718,45 @@ function insertBounded(
 	top.splice(index, 0, entry);
 	if (top.length > limit) top.pop();
 }
+
+/**
+ * Insertion dans un top-K trié pendant le scoring : le tableau ne dépasse
+ * jamais K entrées (mémoire bornée, pas de tri complet à tronquer) et la
+ * majorité des candidats est rejetée en O(1) via le dernier élément.
+ */
+function insertTopK<T>(
+	top: T[],
+	entry: T,
+	limit: number,
+	better: (left: T, right: T) => boolean,
+): void {
+	if (top.length >= limit && !better(entry, top[top.length - 1]!)) return;
+	let index = top.length;
+	while (index > 0 && better(entry, top[index - 1]!)) index -= 1;
+	top.splice(index, 0, entry);
+	if (top.length > limit) top.pop();
+}
+
+/** Ordre top-K lexical : recouvrement desc, confiance desc, trust desc. */
+const LEXICAL_BETTER = (
+	left: { hit: SearchHit; lexicalScore: number },
+	right: { hit: SearchHit; lexicalScore: number },
+): boolean =>
+	left.lexicalScore > right.lexicalScore ||
+	(left.lexicalScore === right.lexicalScore &&
+		(left.hit.memory.confidence > right.hit.memory.confidence ||
+			(left.hit.memory.confidence === right.hit.memory.confidence &&
+				TRUST_RANK(left.hit.memory.sourceTrust) >
+					TRUST_RANK(right.hit.memory.sourceTrust))));
+
+/** Ordre top-K vectoriel : similarité desc, confiance desc, trust desc. */
+const VECTOR_BETTER = (left: SearchHit, right: SearchHit): boolean =>
+	(left.vectorScore ?? 0) > (right.vectorScore ?? 0) ||
+	((left.vectorScore ?? 0) === (right.vectorScore ?? 0) &&
+		(left.memory.confidence > right.memory.confidence ||
+			(left.memory.confidence === right.memory.confidence &&
+				TRUST_RANK(left.memory.sourceTrust) >
+					TRUST_RANK(right.memory.sourceTrust))));
 
 function clip(text: string, max: number): string {
 	return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
