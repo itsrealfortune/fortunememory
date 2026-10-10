@@ -10,14 +10,14 @@ Ships with an OpenCode plugin (`opencode-plugin.ts`) that exposes the library as
 
 LLMs using openself go through its CLI: every `openself memory search …` spawns a fresh Node process - ~1.5 s of startup (heavy imports, DB open) before doing any work. Even `openself --help` takes that long. In an agentic loop that reads/writes memory dozens of times per task, the spawn cost dominates everything.
 
-fortunememory runs **in-process**: the OpenCode plugin calls the manager directly, so a `tool_call` costs the engine work only - sub-ms writes, ~12 ms hybrid searches.
+fortunememory runs **in-process**: the OpenCode plugin calls the manager directly, so a `tool_call` costs the engine work only - sub-ms writes, ~9 ms hybrid searches.
 
 Measured on one machine (N=500, sqlite, same dataset - reproduce with `npm run bench:vs-openself`):
 
 | Op | fortunememory (`tool_call`) | openself CLI | Factor |
 |---|---|---|---|
-| `remember` / `memory add` | 0.45 ms | ~1510 ms | ~3300× |
-| `search` / `memory search` | ~12 ms | ~1600 ms | ~130× |
+| `remember` / `memory add` | 0.40 ms | ~1510 ms | ~3800× |
+| `search` / `memory search` | 9.0 ms | ~1600 ms | ~180× |
 
 Engine-to-engine (library vs library, CLI out of the picture) the big win is architectural, but round4 also pulled ahead algorithmically (`vector_blob` + dot-product fast path, FTS5 bm25 lexical, lazy streaming fetch vs JSON vectors + full-store scans):
 
